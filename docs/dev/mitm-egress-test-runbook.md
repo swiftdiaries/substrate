@@ -128,9 +128,9 @@ E2E_EGRESS_MITM=1 E2E_SANDBOX_CLASS=microvm hack/run-e2e-kind.sh \
 ```
 
 `TestActorEgressHTTPSNonStandardPort` checks verified HTTPS on port 8443.
-`TestActorEgressWebSocket` and `TestActorEgressSecureWebSocket` check the 101
-upgrade and three ordered text echoes. The secure case also checks verified
-TLS. Each test matches the gateway's CONNECT log to its actor and destination.
+`TestActorEgressWebSocket` and `TestActorEgressSecureWebSocket` check that the
+HTTP/1.1 WebSocket upgrade is denied with an inner 403 and handshake error,
+without echoed messages.
 The `^TestActorEgress` selection includes the existing HTTP, HTTPS,
 non-standard-port, and gRPC tests as well.
 

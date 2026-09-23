@@ -833,6 +833,10 @@ func prepareProtocolActor(t *testing.T, ctx context.Context, prefix string) (str
 // postEgressOnce starts the measured operation only after readiness. Unlike
 // postThroughEgressActor, an outbound failure is never retried.
 func postEgressOnce(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef, path string, input any) []byte {
+	return postEgressWithStatus(t, ctx, router, actorRef, path, input, http.StatusOK)
+}
+
+func postEgressWithStatus(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef, path string, input any, wantStatus int) []byte {
 	t.Helper()
 	payload, err := json.Marshal(input)
 	if err != nil {
@@ -852,8 +856,8 @@ func postEgressOnce(t *testing.T, ctx context.Context, router *e2e.RouterClient,
 	if len(raw) > 1<<20 {
 		t.Fatal("actor operation response exceeds 1 MiB")
 	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("actor %s operation %s returned HTTP %d: %s", actorRef.Name, path, response.StatusCode, raw)
+	if response.StatusCode != wantStatus {
+		t.Fatalf("actor %s operation %s returned HTTP %d, want %d: %s", actorRef.Name, path, response.StatusCode, wantStatus, raw)
 	}
 	return raw
 }
