@@ -17,6 +17,7 @@ package networking
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/e2e"
@@ -63,6 +64,9 @@ func TestActorEgressWebSocket(t *testing.T) {
 }
 
 func TestActorEgressSecureWebSocket(t *testing.T) {
+	if os.Getenv("E2E_EGRESS_MITM") == "" {
+		t.Skip("requires MITM egress to inspect the WebSocket handshake inside TLS")
+	}
 	ctx := t.Context()
 	_, address, rootCA := prepareProtocolOrigin(t, ctx, e2e.ServerPod{
 		Name: "wss-origin", ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
