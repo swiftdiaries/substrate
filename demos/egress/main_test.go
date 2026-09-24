@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
@@ -70,6 +71,26 @@ func TestFetch(t *testing.T) {
 	}
 	if got.StatusCode != http.StatusTeapot || got.Body != "hello from upstream" {
 		t.Errorf("response = %+v", got)
+	}
+}
+
+func TestClockDiagnostic(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	newHandler(nil).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/debug/clock", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /debug/clock status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var got map[string]string
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding clock diagnostic: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, got["utc"]); err != nil {
+		t.Errorf("guest UTC %q is invalid: %v", got["utc"], err)
+	}
+	for _, field := range []string{"cmdline", "clocksource"} {
+		if got[field] == "" && got[field+"_error"] == "" {
+			t.Errorf("diagnostic has neither %s nor its read error", field)
+		}
 	}
 }
 

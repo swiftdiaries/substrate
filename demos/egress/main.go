@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -133,6 +134,27 @@ func main() {
 
 func newHandler(client *http.Client) http.Handler {
 	mux := http.NewServeMux()
+	// Temporary CI diagnostic for the restored micro-VM clock investigation.
+	// Keep this read-only and narrowly scoped to the clock test fixture.
+	mux.HandleFunc("/debug/clock", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method must be GET"})
+			return
+		}
+		resp := map[string]string{"utc": time.Now().UTC().Format(time.RFC3339Nano)}
+		for key, path := range map[string]string{
+			"cmdline":     "/proc/cmdline",
+			"clocksource": "/sys/devices/system/clocksource/clocksource0/current_clocksource",
+		} {
+			if b, err := os.ReadFile(path); err == nil {
+				resp[key] = strings.TrimSpace(string(b))
+			} else {
+				resp[key+"_error"] = err.Error()
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")

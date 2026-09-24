@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/e2e"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -89,6 +90,7 @@ func TestMicroVMClockAfterDelayedRestore(t *testing.T) {
 	waitForRouteReady(t, "restored actor ingress readiness", func() (*http.Response, error) {
 		return router.Get(ctx, actorRef, "/readyz")
 	})
+	logRestoredGuestClock(t, ctx, router, actorRef)
 
 	since := metav1.NewTime(time.Now().Add(-time.Minute))
 	raw := postEgressOnce(t, ctx, router, actorRef, "/", map[string]any{
@@ -108,6 +110,26 @@ func TestMicroVMClockAfterDelayedRestore(t *testing.T) {
 		t.Errorf("delayed-restore HTTPS observation = %+v; want one verified TLS HTTP/1.1 8443 request", got)
 	}
 	assertProtocolGateway(t, ctx, since, actorName, target.Address())
+}
+
+// logRestoredGuestClock captures diagnostics from the same guest that performs
+// the delayed-restore TLS request. It is best-effort so missing debug data does
+// not replace the TLS assertion that this test exists to exercise.
+func logRestoredGuestClock(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef) {
+	t.Helper()
+	response, err := router.Get(ctx, actorRef, "/debug/clock")
+	if err != nil {
+		t.Logf("clock evidence guest diagnostic request failed: %v", err)
+		return
+	}
+	defer response.Body.Close()
+	var guest map[string]string
+	if err := json.NewDecoder(response.Body).Decode(&guest); err != nil {
+		t.Logf("clock evidence guest diagnostic decode failed (HTTP %d): %v", response.StatusCode, err)
+		return
+	}
+	t.Logf("clock evidence host_utc_at_guest_diagnostic=%s guest_utc=%q clocksource=%q cmdline=%q clocksource_error=%q cmdline_error=%q",
+		time.Now().UTC().Format(time.RFC3339Nano), guest["utc"], guest["clocksource"], guest["cmdline"], guest["clocksource_error"], guest["cmdline_error"])
 }
 
 func logOriginCertificateValidity(t *testing.T, ctx context.Context, target e2e.Server, rootCA string, suspendBoundary time.Time) {
