@@ -132,6 +132,8 @@ jobs:
     - name: Run E2E tests (gVisor)
       run: hack/run-e2e-kind.sh -v -args --no-color
     - name: Run E2E tests (micro-VM)
+      id: baseline-microvm-e2e
+      continue-on-error: true
       # The same suites again, with every fixture repointed at its micro-VM
       # variant by the single E2E_SANDBOX_CLASS knob (see internal/e2e/sandbox.go).
       # Sequential with the gVisor lane above, not concurrent: a suite releases
@@ -188,7 +190,7 @@ jobs:
         E2E_SANDBOX_CLASS: microvm
       run: hack/run-e2e-kind.sh ./internal/e2e/suites/networking -run '^TestActorEgress' -v -args --no-color
     - name: Dump diagnostics on failure
-      if: failure()
+      if: failure() || steps.baseline-microvm-e2e.outcome == 'failure'
       run: |
         kubectl --context kind-kind get workerpool,pods -A -o wide || true
         dump() {
@@ -211,6 +213,11 @@ jobs:
           kubectl --context kind-kind get pods -n "$ns" -o name --no-headers 2>/dev/null \
             | while read -r name; do dump "$ns" "$name"; done
         done
+    - name: Require baseline micro-VM E2E success
+      if: always()
+      env:
+        BASELINE_MICROVM_OUTCOME: ${{ steps.baseline-microvm-e2e.outcome }}
+      run: test "$BASELINE_MICROVM_OUTCOME" = success
   # Preserve the required-check name while the concrete Envoy and AgentGateway
   # executions run as entries in the shared matrix above.
   e2e-test:
