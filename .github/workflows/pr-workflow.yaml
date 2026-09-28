@@ -251,6 +251,8 @@ jobs:
       run: |
         hack/install-ate-kind.sh --deploy-demo-egress
         hack/install-ate-kind.sh --deploy-demo-egress-microvm
+    - name: Trust local TLS origins in egress gateway
+      run: hack/setup-e2e-egress-tls-kind.sh
     - name: Run E2E tests (gVisor)
       env:
         E2E_JUNIT_FILE: ${{ github.workspace }}/_artifacts/e2e-gvisor.xml
