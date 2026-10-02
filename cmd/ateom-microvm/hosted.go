@@ -23,13 +23,11 @@ import (
 	"net"
 	"time"
 
-	"github.com/vishvananda/netns"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
+	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateomcgroup"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
+	"github.com/agent-substrate/substrate/internal/ateomnet/netns"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/sizing"
@@ -57,7 +55,7 @@ func (s *AteomService) admitActor(attribution resources.ActorAttribution) (*host
 	if old, ok := s.actors[attribution.UID]; ok {
 		stale = old.network
 	} else if len(s.actors)+s.draining >= s.maxActors {
-		return nil, nil, status.Errorf(codes.ResourceExhausted, "worker is full: %d actors", s.maxActors)
+		return nil, nil, apierror.ResourceExhausted("worker is full: %d actors", s.maxActors)
 	}
 	hosted := &hostedActor{attribution: attribution}
 	s.actors[attribution.UID] = hosted
@@ -87,9 +85,9 @@ func (s *AteomService) hostActor(ctx context.Context, attribution resources.Acto
 	// The tap and atunnel share a namespace; the guest owns the other end.
 	session, err := ateomnet.ServeSandbox(ctx, ateomnet.SandboxNetworkConfig{
 		ActorUID:   uid,
-		EgressPort: s.atunnelEgressPort,
+		EgressPort: s.tunnel.EgressPort,
 		DNSPort:    atunnel.DNSPort,
-	}, s.atunnelEgress, s.dnsRelay)
+	}, s.tunnel.Egress, s.tunnel.DNSRelay)
 	if err != nil {
 		s.actorsMu.Lock()
 		delete(s.actors, uid)
@@ -218,7 +216,7 @@ func (s *AteomService) guestStatsFor(actorUID string) *guestStatsTarget {
 }
 
 // sandboxNetNS is where an actor's tap and atunnel's sockets live, or -1.
-func (s *AteomService) sandboxNetNS(actorUID string) netns.NsHandle {
+func (s *AteomService) sandboxNetNS(actorUID string) netns.Handle {
 	hosted := s.lookupActor(actorUID)
 	if hosted == nil {
 		return -1

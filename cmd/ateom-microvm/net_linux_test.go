@@ -21,9 +21,10 @@ import (
 	"testing"
 
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netns"
 
 	"github.com/agent-substrate/substrate/internal/ateomnet"
+	"github.com/agent-substrate/substrate/internal/ateomnet/netns"
+	"github.com/agent-substrate/substrate/internal/ateomtunnel"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -44,11 +45,9 @@ func TestHostActorReplacesSameActor(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := &AteomService{
-		atunnelEgress:     egress,
-		atunnelEgressPort: 15001,
-		dnsRelay:          dns,
-		actors:            map[string]*hostedActor{},
-		maxActors:         1,
+		tunnel:    &ateomtunnel.Tunnel{Egress: egress, EgressPort: 15001, DNSRelay: dns},
+		actors:    map[string]*hostedActor{},
+		maxActors: 1,
 	}
 	const actorUID = "microvm-network-replace"
 	t.Cleanup(func() {
@@ -72,15 +71,15 @@ func TestHostActorReplacesSameActor(t *testing.T) {
 }
 
 // tapNetNS gives a test its own namespace to build a tap in.
-func tapNetNS(t *testing.T, name string) netns.NsHandle {
+func tapNetNS(t *testing.T, name string) netns.Handle {
 	t.Helper()
-	ns, err := ateomnet.CreateNetNSWithoutSwitching(name)
+	ns, err := netns.CreateNamed(name)
 	if err != nil {
 		t.Fatalf("creating namespace: %v", err)
 	}
 	t.Cleanup(func() {
 		ns.Close()
-		_ = netns.DeleteNamed(name)
+		_ = netns.RemoveNamed(name)
 	})
 	return ns
 }
@@ -106,7 +105,7 @@ func TestSetupActorTap(t *testing.T) {
 		t.Errorf("got %d descriptors, want one per queue pair", len(fds))
 	}
 
-	if err := ateomnet.NetNSDo(ctx, ns, func(context.Context) error {
+	if err := netns.Do(ctx, ns, func(context.Context) error {
 		link, err := netlink.LinkByName("tap0_kata")
 		if err != nil {
 			return err

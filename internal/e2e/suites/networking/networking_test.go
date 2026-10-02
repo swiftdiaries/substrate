@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,35 +33,6 @@ import (
 )
 
 const networkingAtespace = "networking-e2e"
-
-// egressFixture returns the egress demo the egress tests build their actors
-// from, for the sandbox class under test and the egress gateway variant
-// deployed.
-//
-// Deploy the one matching the lane:
-//
-//	hack/install-ate-kind.sh --deploy-demo-egress                     # passthrough, gVisor
-//	hack/install-ate-kind.sh --deploy-demo-egress-microvm             # passthrough, micro-VM
-//	hack/install-ate-kind.sh --deploy-demo-egress-mitm                # sdsmint, gVisor
-//	hack/install-ate-kind.sh --deploy-demo-egress-microvm-mitm        # sdsmint, micro-VM
-func egressFixture() e2e.Fixture {
-	// E2E_EGRESS_MITM selects the egress gateway variant.
-	if os.Getenv("E2E_EGRESS_MITM") == "" {
-		return e2e.EgressFixture()
-	}
-	if e2e.IsMicroVM() {
-		return e2e.Fixture{
-			Namespace:  "ate-demo-egress-microvm-mitm",
-			Name:       "egress-microvm-mitm",
-			DeployWith: "hack/install-ate-kind.sh --deploy-demo-egress-microvm-mitm",
-		}
-	}
-	return e2e.Fixture{
-		Namespace:  "ate-demo-egress-mitm",
-		Name:       "egress-mitm",
-		DeployWith: "hack/install-ate-kind.sh --deploy-demo-egress-mitm",
-	}
-}
 
 func TestActorDirectAccess(t *testing.T) {
 	ctx := context.Background()
@@ -110,9 +80,9 @@ func TestActorEgress(t *testing.T) {
 	origin := egressHTTPTarget()
 	target := e2e.DeployServerPod(t, ctx, origin)
 
-	fixture := egressFixture()
+	fixture := e2e.EgressFixture()
 
-	actorAtespace, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress", fixture, e2e.EgressAllowAll())
+	actorAtespace, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress", fixture, e2e.EgressAllowAll()...)
 	router := mustRouterClient(t, ctx)
 	defer router.Close()
 
@@ -144,14 +114,11 @@ func TestActorEgress(t *testing.T) {
 }
 
 // TestActorEgressHTTPS covers the same path as TestActorEgress with a TLS
-// origin, where the gateway cannot see inside the request. atenet-egress
-// authorizes the CONNECT against the Actor's actor-identity certificate and
-// then relays raw TCP: it never decrypts, so the TLS session runs end to end
-// between the Actor and the origin.
+// origin, through the gateway's TLS interception.
 func TestActorEgressHTTPS(t *testing.T) {
 	ctx := context.Background()
-	fixture := egressFixture()
-	actorAtespace, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress-https", fixture, e2e.EgressAllowAll())
+	fixture := e2e.EgressFixture()
+	actorAtespace, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress-https", fixture, e2e.EgressAllowAll()...)
 	router := mustRouterClient(t, ctx)
 	defer router.Close()
 
@@ -197,8 +164,8 @@ func TestActorEgressNonStandardPort(t *testing.T) {
 	// resumed Actor idling in the cluster waiting for a destination.
 	target := e2e.DeployServerPod(t, ctx, httpTarget)
 
-	fixture := egressFixture()
-	actorAtespace, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress-port", fixture, e2e.EgressAllowAll())
+	fixture := e2e.EgressFixture()
+	actorAtespace, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress-port", fixture, e2e.EgressAllowAll()...)
 	router := mustRouterClient(t, ctx)
 	defer router.Close()
 
@@ -399,7 +366,7 @@ func createAndResumeActorWithEgress(t *testing.T, ctx context.Context, prefix st
 func createAndResumeSubstrateActor(t *testing.T, ctx context.Context, prefix string, template e2e.SubstrateFixture) (string, string, *ateapipb.Actor) {
 	t.Helper()
 	actor := &ateapipb.Actor{ActorTemplate: &ateapipb.ObjectRef{Atespace: template.Atespace, Name: template.Name}}
-	return createAndResume(t, ctx, prefix, actor, template.Atespace+"/"+template.Name, template.DeployWith, []*ateapipb.EgressRule{e2e.EgressAllowAll()})
+	return createAndResume(t, ctx, prefix, actor, template.Atespace+"/"+template.Name, template.DeployWith, e2e.EgressAllowAll())
 }
 
 // createAndResume creates the actor, gives it an EgressPolicy with rules (none

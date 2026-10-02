@@ -65,12 +65,6 @@ func applySnapshotConfigDefaults(sc *ateapipb.SnapshotConfig) {
 	if sc.OnCommit == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED {
 		sc.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
 	}
-	if sc.OnResume == nil {
-		sc.OnResume = &ateapipb.OnResumeConfig{}
-	}
-	if sc.OnResume.FromData == ateapipb.ResumeSource_RESUME_SOURCE_UNSPECIFIED {
-		sc.OnResume.FromData = ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT
-	}
 }
 
 func applyContainerDefaults(c *ateapipb.Container) {
@@ -93,7 +87,22 @@ func applyActorDefaults(*ateapipb.Actor) {}
 
 func applyAtespaceDefaults(*ateapipb.Atespace) {}
 
-func applyEgressPolicyDefaults(*ateapipb.EgressPolicy) {}
+// applyEgressPolicyDefaults fills the port of an http or https rule that
+// names none: the protocol's well-known port. A tls_passthrough rule has no
+// default; validation requires its ports.
+func applyEgressPolicyDefaults(p *ateapipb.EgressPolicy) {
+	if p == nil {
+		return
+	}
+	for _, r := range p.Rules {
+		switch {
+		case r.GetHttp() != nil && r.Http.Ports == nil:
+			r.Http.Ports = &ateapipb.Ports{Numbers: []int32{80}}
+		case r.GetHttps() != nil && r.Https.Ports == nil:
+			r.Https.Ports = &ateapipb.Ports{Numbers: []int32{443}}
+		}
+	}
+}
 
 func applyTagDefaults(*ateapipb.Tag) {}
 
