@@ -380,12 +380,12 @@ func waitForEgressTunnelPolicyLog(t *testing.T, ctx context.Context, since metav
 		}
 		for _, pod := range pods.Items {
 			for _, container := range pod.Spec.Containers {
-				if container.Name != "extproc" {
+				if container.Name != "ext-proc" {
 					continue
 				}
-				logs, err := clients.K8s.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: "extproc", SinceTime: &since}).DoRaw(ctx)
+				logs, err := clients.K8s.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: "ext-proc", SinceTime: &since}).DoRaw(ctx)
 				if err != nil {
-					t.Fatalf("reading extproc logs from %s/%s: %v", pod.Namespace, pod.Name, err)
+					t.Fatalf("reading ext-proc logs from %s/%s: %v", pod.Namespace, pod.Name, err)
 				}
 				for _, line := range strings.Split(string(logs), "\n") {
 					var event struct {
