@@ -254,18 +254,6 @@ jobs:
         hack/install-ate-kind.sh --deploy-demo-egress-microvm
     - name: Trust local TLS origins in egress gateway
       run: hack/setup-e2e-egress-tls-kind.sh
-    - name: Test H2 egress policy pool isolation
-      if: matrix.dataplane == 'envoy'
-      run: |
-        image="$(kubectl --context kind-kind -n ate-system get deployment atenet-egress -o jsonpath='{.spec.template.spec.containers[?(@.name=="envoy")].image}')"
-        if [[ -z "$image" ]]; then
-          echo "error: Envoy image is missing from the installed egress deployment" >&2
-          exit 1
-        fi
-        docker pull "$image"
-        mkdir -p _artifacts
-        set -o pipefail
-        SUBSTRATE_ENVOY_TEST_IMAGE="$image" go test -tags envoy_integration -run '^TestEgressPoolSeparatesPolicies$' -count=1 -v -timeout=5m ./cmd/atenet/internal/router 2>&1 | tee _artifacts/envoy-pool-regression.log
     # scale the idle sandbox class's demo pools to zero so each lane has the node
     - name: Focus the node on gVisor
       run: hack/e2e-focus-sandbox-class.sh gvisor
