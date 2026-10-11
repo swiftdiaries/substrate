@@ -107,11 +107,14 @@ port; the address the actor dialed plays no part (see
 
 Identity on the request legs is `dev.ate.actor.identity`, the actor's SPIFFE
 ID that the outer chain set from the verified peer certificate and shares with
-the inner listener. Envoy builds every inner connection from the filter state
-of the tunnel that created its pool, so `mitm_internal` keeps one pool per
-downstream connection, which on the HTTP/1 egress listener is one per tunnel:
-no tunnel inherits another's identity, authority or rules. Nothing inside the
-tunnel can write any of this; a callout without an identity is refused.
+the inner listener. `mitm_internal` keeps pools per downstream connection and
+hashes the CONNECT authority and policy (`envoy.hashable_string` filter state)
+into the pool key. The downstream connection preserves authenticated actor
+isolation; authority and policy ensure concurrent streams on one HTTP/2
+connection only reuse a pool when the inner routing and authorization context
+match. Actor identity remains ordinary `envoy.string` filter state. Nothing
+inside the tunnel can write any of this; a callout without an identity is
+refused.
 
 Policies are read through a per-actor cache (`--egress-policy-cache-ttl`, 10s
 by default; 0 disables it). The TTL is exactly how stale a decision can be: a
@@ -192,6 +195,13 @@ ingress dataplane, `atenet-egress` the egress gateway.
 
 `--atenet-dataplane` selects the dataplane for both Deployments. Each gateway has
 its own static configuration because ingress and egress scale independently.
+
+The networking E2E suite covers pool isolation across policy refresh with a
+real Actor, TLS origin, and shared HTTP/2 tunnel. It holds one TLS request open
+while the policy cache expires, then makes a fresh TLS connection to the same
+service address after removing that host from the allowlist. The test lives in
+`internal/e2e/suites/networking/egresspolicy_test.go` and runs in the existing
+cluster-backed E2E workflow.
 
 ## status page
 

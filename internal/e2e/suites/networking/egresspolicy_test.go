@@ -16,14 +16,19 @@ package networking
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/e2e"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // The EgressPolicy half of egress: the other TestActorEgress* tests give their
@@ -69,6 +74,178 @@ func TestActorEgressPolicyDeniesUnlistedHost(t *testing.T) {
 		t.Fatalf("fetch of the same origin by address %s returned HTTP %d, want an egress-policy denial; body: %s", url, status, body)
 	}
 	t.Logf("fetch by address was denied as expected: %s", body)
+}
+
+// TestActorEgressPolicyRefreshesAcrossH2Connects uses one real Actor and two
+// fresh TLS dials to the same service IP:port. atunnel keeps the Actor's H2
+// connection open while the policy changes between CONNECT streams.
+func TestActorEgressPolicyRefreshesAcrossH2Connects(t *testing.T) {
+	if os.Getenv(e2e.AtenetDataplaneEnv) == "agentgateway" {
+		t.Skip("TLS passthrough policy is not supported by this dataplane")
+	}
+	ctx := t.Context()
+	const expectedBody = "policy pool origin"
+	target, address, rootCA := prepareProtocolOrigin(t, ctx, e2e.ServerPod{
+		Name:       "policy-pool-origin",
+		ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
+		Args:       []string{"http", "--body=" + expectedBody, "--hold-duration=14s"},
+		Port:       8443,
+	}, true)
+
+	hostname, _, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatalf("splitting TLS origin address %q: %v", address, err)
+	}
+	ports := []int32{8443}
+	initialRules := []*ateapipb.EgressRule{
+		e2e.EgressAllowPassthroughOnPorts(ports, hostname, "control.test"),
+	}
+	_, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress-policy-pool", egressFixture(), initialRules...)
+	router := mustRouterClient(t, ctx)
+	t.Cleanup(func() { router.Close() })
+	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
+	waitForActorRoute(t, ctx, router, actorRef)
+	actorObject := &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name}
+	clients := e2e.GetClients()
+	since := metav1.NewTime(time.Now().Add(-time.Minute))
+	type fetchResult struct {
+		StatusCode int    `json:"statusCode"`
+		Body       string `json:"body"`
+		Protocol   string `json:"protocol"`
+		TLS        bool   `json:"tls"`
+		Error      string `json:"error"`
+	}
+	decode := func(raw []byte) fetchResult {
+		t.Helper()
+		var result fetchResult
+		if err := json.Unmarshal(raw, &result); err != nil {
+			t.Fatalf("decoding Actor egress result %q: %v", raw, err)
+		}
+		return result
+	}
+
+	firstRequest := map[string]any{"url": "https://" + address + "/hold", "rootCA": rootCA, "http1": true}
+	firstDone := make(chan struct {
+		status int
+		raw    []byte
+		err    error
+	}, 1)
+	go func() {
+		status, raw, err := postEgressResponse(ctx, router, actorRef, "/", firstRequest)
+		firstDone <- struct {
+			status int
+			raw    []byte
+			err    error
+		}{status, raw, err}
+	}()
+	waitForEgressTunnelPolicyLog(t, ctx, since, actorRef, target.Address(), 2)
+	select {
+	case <-firstDone:
+		t.Fatal("first held TLS fetch completed before policy update")
+	default:
+	}
+
+	updatedRules := []*ateapipb.EgressRule{e2e.EgressAllowPassthroughOnPorts(ports, "control.test")}
+	e2e.EnsureEgressPolicy(t, ctx, clients, actorObject, updatedRules...)
+	policy, err := clients.SubstrateAPI.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: actorObject})
+	if err != nil {
+		t.Fatalf("reading updated EgressPolicy for %s: %v", actorName, err)
+	}
+	if rules := policy.GetRules(); len(rules) != 1 || rules[0].GetTlsPassthrough() == nil || len(rules[0].GetTlsPassthrough().GetHostnames()) != 1 || rules[0].GetTlsPassthrough().GetHostnames()[0] != "control.test" {
+		t.Fatalf("updated EgressPolicy rules = %v, want only TLS passthrough control.test", rules)
+	}
+
+	// The first ext_proc lookup started the 10-second policy-cache TTL. Keep
+	// its inner TLS connection active while waiting for that entry to expire.
+	time.Sleep(10*time.Second + 500*time.Millisecond)
+	select {
+	case result := <-firstDone:
+		t.Fatalf("first held TLS fetch finished before the second began: HTTP %d, error %v", result.status, result.err)
+	default:
+	}
+	secondRequest := map[string]any{"url": "https://" + address + "/healthz", "rootCA": rootCA, "http1": true}
+	secondStarted := make(chan struct{})
+	secondDone := make(chan struct {
+		status int
+		raw    []byte
+		err    error
+	}, 1)
+	go func() {
+		close(secondStarted)
+		status, raw, err := postEgressResponse(ctx, router, actorRef, "/", secondRequest)
+		secondDone <- struct {
+			status int
+			raw    []byte
+			err    error
+		}{status, raw, err}
+	}()
+	<-secondStarted
+	select {
+	case result := <-firstDone:
+		t.Fatalf("first held TLS fetch ended as second request began: HTTP %d, error %v", result.status, result.err)
+	default:
+	}
+	secondResult := <-secondDone
+	secondStatus, secondRaw, err := secondResult.status, secondResult.raw, secondResult.err
+	if err != nil {
+		t.Fatalf("second TLS fetch transport: %v", err)
+	}
+	second := decode(secondRaw)
+	if secondStatus != http.StatusBadGateway || second.Error == "" {
+		t.Errorf("revoked SNI fetch returned HTTP %d, result %+v; want inner TLS failure after an accepted CONNECT", secondStatus, second)
+	} else {
+		t.Logf("revoked SNI failed after policy update: %s", second.Error)
+	}
+	waitForEgressTunnelPolicyLog(t, ctx, since, actorRef, target.Address(), 1)
+	select {
+	case result := <-firstDone:
+		if result.err != nil {
+			t.Errorf("first held TLS fetch: %v", result.err)
+		} else {
+			first := decode(result.raw)
+			if result.status != http.StatusOK || first.StatusCode != http.StatusOK || first.Body != expectedBody || first.Protocol != "HTTP/1.1" || !first.TLS {
+				t.Errorf("first held TLS fetch: HTTP %d, result %+v; want verified HTTP/1.1 response %q", result.status, first, expectedBody)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first held TLS fetch did not complete after the second request")
+	}
+
+	var observed []gatewayAccessLogLine
+	wantAuthority := target.Address()
+	wantIdentity := resources.AteomForActorSPIFFEID(actorRef).String()
+	waitForAccessLog(t, ctx, since, "H2 CONNECT streams for the same Actor and origin authority", func(lines []gatewayAccessLogLine) bool {
+		observed = observed[:0]
+		for _, line := range lines {
+			if line.container != "envoy" {
+				continue
+			}
+			authority, _ := accessLogField(line.text, "authority")
+			peers, _ := accessLogField(line.text, "peer_san")
+			if authority == wantAuthority && strings.Contains(peers, wantIdentity) {
+				observed = append(observed, line)
+			}
+		}
+		return len(observed) >= 2
+	})
+	if len(observed) < 2 {
+		t.Fatalf("observed %d matching CONNECT records, want at least two: %+v", len(observed), observed)
+	}
+	connectionID := ""
+	for i, line := range observed {
+		protocol, _ := accessLogField(line.text, "protocol")
+		id, _ := accessLogField(line.text, "connection_id")
+		code, _ := accessLogField(line.text, "code")
+		if protocol != "HTTP/2" || id == "" || code != "200" {
+			t.Errorf("CONNECT record %d = %q; want HTTP/2, a connection ID, and accepted CONNECT code 200", i+1, line.text)
+		}
+		if i == 0 {
+			connectionID = id
+		} else if id != connectionID {
+			t.Errorf("CONNECT records used connection IDs %q and %q, want one shared H2 connection", connectionID, id)
+		}
+		t.Logf("H2 CONNECT evidence: %s", line.text)
+	}
 }
 
 // TestActorEgressRequiresPolicy: an actor with no EgressPolicy is denied.
