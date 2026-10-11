@@ -33,33 +33,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  envoy-pool-regression:
-    name: Envoy H2 policy pool regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      SUBSTRATE_ENVOY_TEST_IMAGE: substrate-factory-key-envoy:local
-    steps:
-    - name: Checkout
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-    - name: Setup Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-      with:
-        go-version-file: go.mod
-    - name: Build production Envoy dataplane
-      run: docker build -t "$SUBSTRATE_ENVOY_TEST_IMAGE" cmd/dataplane/envoy
-    - name: Test policy isolation across H2 CONNECT streams
-      run: |
-        mkdir -p _artifacts
-        set -o pipefail
-        go test -tags envoy_integration -run '^TestEgressPoolSeparatesPolicies$' -count=1 -v -timeout=5m ./cmd/atenet/internal/router 2>&1 | tee _artifacts/envoy-pool-regression.log
-    - name: Upload regression evidence
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-      with:
-        name: envoy-pool-regression
-        path: _artifacts/envoy-pool-regression.log
-        if-no-files-found: warn
   run-tests:
     runs-on: ubuntu-latest
     # A bound well clear of the observed runtime. Without one the platform
@@ -281,6 +254,18 @@ jobs:
         hack/install-ate-kind.sh --deploy-demo-egress-microvm
     - name: Trust local TLS origins in egress gateway
       run: hack/setup-e2e-egress-tls-kind.sh
+    - name: Test H2 egress policy pool isolation
+      if: matrix.dataplane == 'envoy'
+      run: |
+        image="$(kubectl --context kind-kind -n ate-system get deployment atenet-egress -o jsonpath='{.spec.template.spec.containers[?(@.name=="envoy")].image}')"
+        if [[ -z "$image" ]]; then
+          echo "error: Envoy image is missing from the installed egress deployment" >&2
+          exit 1
+        fi
+        docker pull "$image"
+        mkdir -p _artifacts
+        set -o pipefail
+        SUBSTRATE_ENVOY_TEST_IMAGE="$image" go test -tags envoy_integration -run '^TestEgressPoolSeparatesPolicies$' -count=1 -v -timeout=5m ./cmd/atenet/internal/router 2>&1 | tee _artifacts/envoy-pool-regression.log
     # scale the idle sandbox class's demo pools to zero so each lane has the node
     - name: Focus the node on gVisor
       run: hack/e2e-focus-sandbox-class.sh gvisor
