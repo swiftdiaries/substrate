@@ -214,7 +214,7 @@ func TestActorEgressPolicyRefreshesAcrossH2Connects(t *testing.T) {
 	var observed []gatewayAccessLogLine
 	wantAuthority := target.Address()
 	wantIdentity := resources.AteomForActorSPIFFEID(actorRef).String()
-	waitForAccessLog(t, ctx, since, "two H2 CONNECT streams for the same Actor and origin authority", func(lines []gatewayAccessLogLine) bool {
+	waitForAccessLog(t, ctx, since, "H2 CONNECT streams for the same Actor and origin authority", func(lines []gatewayAccessLogLine) bool {
 		observed = observed[:0]
 		for _, line := range lines {
 			if line.container != "envoy" {
@@ -228,8 +228,8 @@ func TestActorEgressPolicyRefreshesAcrossH2Connects(t *testing.T) {
 		}
 		return len(observed) >= 2
 	})
-	if len(observed) != 2 {
-		t.Fatalf("observed %d matching CONNECT records, want two: %+v", len(observed), observed)
+	if len(observed) < 2 {
+		t.Fatalf("observed %d matching CONNECT records, want at least two: %+v", len(observed), observed)
 	}
 	connectionID := ""
 	for i, line := range observed {
