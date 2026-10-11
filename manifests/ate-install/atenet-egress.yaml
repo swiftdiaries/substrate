@@ -182,7 +182,7 @@ data:
                   # The IP:port the actor dialed, for the request legs to match a
                   # rule's ports against: a port in a request's Host is not it.
                   - object_key: dev.ate.connect.authority
-                    factory_key: envoy.string
+                    factory_key: envoy.hashable_string
                     shared_with_upstream: ONCE
                     skip_if_empty: true
                     format_string:
@@ -254,7 +254,7 @@ data:
                   # SNI rules for the egress-policy module. If absent, all TLS
                   # is denied.
                   - object_key: dev.ate.policy.egress
-                    factory_key: envoy.string
+                    factory_key: envoy.hashable_string
                     skip_if_empty: true
                     shared_with_upstream: ONCE
                     format_string:
@@ -873,11 +873,12 @@ data:
             max_connections: 16384
             max_requests: 16384
             max_pending_requests: 16384
-        # One pool per tunnel. A pool gives every connection it opens the
-        # filter state of the tunnel that created it, so a pool shared by two
-        # tunnels would hand the second one the first one's actor, authority
-        # and rules. The egress listener speaks HTTP/1, which carries one
-        # CONNECT per downstream connection.
+        # Pool identity includes the downstream connection and the hashable
+        # CONNECT authority and policy below. The downstream connection keeps
+        # actor identity isolated between authenticated clients; hashable
+        # authority and policy let concurrent CONNECT streams on one HTTP/2
+        # connection share a pool only when their routing and policy state
+        # match.
         connection_pool_per_downstream_connection: true
         typed_extension_protocol_options:
           envoy.extensions.upstreams.tcp.v3.TcpProtocolOptions:

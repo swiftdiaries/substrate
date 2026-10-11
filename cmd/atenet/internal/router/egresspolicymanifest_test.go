@@ -404,6 +404,12 @@ func TestEgressManifestsShareIdentityWithTheInnerListener(t *testing.T) {
 			if got := str(authority, "shared_with_upstream"); got == "" {
 				t.Errorf("%s is not shared with upstream; the inner legs would see no dialed port", extproc.ConnectAuthorityFilterStateKey)
 			}
+			if got := str(authority, "factory_key"); got != "envoy.hashable_string" {
+				t.Errorf("%s uses factory %q, want envoy.hashable_string so the internal connection pool is keyed by authority", extproc.ConnectAuthorityFilterStateKey, got)
+			}
+			if got := str(identity, "factory_key"); got != "envoy.string" {
+				t.Errorf("%s uses factory %q, want envoy.string; authenticated identity remains scoped by downstream connection", extproc.ActorIdentityFilterStateKey, got)
+			}
 		})
 	}
 }
@@ -737,8 +743,8 @@ func TestEgressManifestsConnectLegHandsTheSNIRulesToTheInnerListener(t *testing.
 	if got := str(child(format, "text_format_source"), "inline_string"); got != extproc.EgressPolicyMetadataFormat {
 		t.Errorf("%s is set from %q, want %q", extproc.EgressPolicyMetadataNamespace, got, extproc.EgressPolicyMetadataFormat)
 	}
-	if got := str(entry, "factory_key"); got != "envoy.string" {
-		t.Errorf("%s uses factory %q, want envoy.string, the string accessor the module reads", extproc.EgressPolicyMetadataNamespace, got)
+	if got := str(entry, "factory_key"); got != "envoy.hashable_string" {
+		t.Errorf("%s uses factory %q, want envoy.hashable_string so distinct policy values select distinct internal connection pools", extproc.EgressPolicyMetadataNamespace, got)
 	}
 	if skip, _ := entry["skip_if_empty"].(bool); !skip {
 		t.Errorf("%s is not skip_if_empty; an absent answer would be written as unparseable JSON", extproc.EgressPolicyMetadataNamespace)
