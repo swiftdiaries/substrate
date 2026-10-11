@@ -88,7 +88,7 @@ func TestActorEgressPolicyRefreshesAcrossH2Connects(t *testing.T) {
 	target, address, rootCA := prepareProtocolOrigin(t, ctx, e2e.ServerPod{
 		Name:       "policy-pool-origin",
 		ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
-		Args:       []string{"http", "--body=" + expectedBody},
+		Args:       []string{"http", "--body=" + expectedBody, "--hold-duration=14s"},
 		Port:       8443,
 	}, true)
 
@@ -124,11 +124,25 @@ func TestActorEgressPolicyRefreshesAcrossH2Connects(t *testing.T) {
 		return result
 	}
 
-	request := map[string]any{"url": "https://" + address + "/healthz", "rootCA": rootCA, "http1": true}
-	firstRaw := postEgressWithStatus(t, ctx, router, actorRef, "/", request, http.StatusOK)
-	first := decode(firstRaw)
-	if first.StatusCode != http.StatusOK || first.Body != expectedBody || first.Protocol != "HTTP/1.1" || !first.TLS {
-		t.Fatalf("first allowed TLS fetch: result %+v; want verified HTTP/1.1 response %q", first, expectedBody)
+	firstRequest := map[string]any{"url": "https://" + address + "/hold", "rootCA": rootCA, "http1": true}
+	firstDone := make(chan struct {
+		status int
+		raw    []byte
+		err    error
+	}, 1)
+	go func() {
+		status, raw, err := postEgressResponse(ctx, router, actorRef, "/", firstRequest)
+		firstDone <- struct {
+			status int
+			raw    []byte
+			err    error
+		}{status, raw, err}
+	}()
+	waitForEgressTunnelPolicyLog(t, ctx, since, actorRef, target.Address(), 2)
+	select {
+	case <-firstDone:
+		t.Fatal("first held TLS fetch completed before policy update")
+	default:
 	}
 
 	updatedRules := []*ateapipb.EgressRule{e2e.EgressAllowPassthroughOnPorts(ports, "control.test")}
@@ -141,14 +155,60 @@ func TestActorEgressPolicyRefreshesAcrossH2Connects(t *testing.T) {
 		t.Fatalf("updated EgressPolicy rules = %v, want only TLS passthrough control.test", rules)
 	}
 
-	// atenet-egress caches each Actor's policy for 10 seconds by default.
-	time.Sleep(11 * time.Second)
-	secondRaw := postEgressWithStatus(t, ctx, router, actorRef, "/", request, http.StatusBadGateway)
+	// The first ext_proc lookup started the 10-second policy-cache TTL. Keep
+	// its inner TLS connection active while waiting for that entry to expire.
+	time.Sleep(10*time.Second + 500*time.Millisecond)
+	select {
+	case result := <-firstDone:
+		t.Fatalf("first held TLS fetch finished before the second began: HTTP %d, error %v", result.status, result.err)
+	default:
+	}
+	secondRequest := map[string]any{"url": "https://" + address + "/healthz", "rootCA": rootCA, "http1": true}
+	secondStarted := make(chan struct{})
+	secondDone := make(chan struct {
+		status int
+		raw    []byte
+		err    error
+	}, 1)
+	go func() {
+		close(secondStarted)
+		status, raw, err := postEgressResponse(ctx, router, actorRef, "/", secondRequest)
+		secondDone <- struct {
+			status int
+			raw    []byte
+			err    error
+		}{status, raw, err}
+	}()
+	<-secondStarted
+	select {
+	case result := <-firstDone:
+		t.Fatalf("first held TLS fetch ended as second request began: HTTP %d, error %v", result.status, result.err)
+	default:
+	}
+	secondResult := <-secondDone
+	secondStatus, secondRaw, err := secondResult.status, secondResult.raw, secondResult.err
+	if err != nil {
+		t.Fatalf("second TLS fetch transport: %v", err)
+	}
 	second := decode(secondRaw)
-	if second.Error == "" {
-		t.Errorf("revoked SNI fetch result %+v; want inner TLS failure after an accepted CONNECT", second)
+	if secondStatus != http.StatusBadGateway || second.Error == "" {
+		t.Errorf("revoked SNI fetch returned HTTP %d, result %+v; want inner TLS failure after an accepted CONNECT", secondStatus, second)
 	} else {
 		t.Logf("revoked SNI failed after policy update: %s", second.Error)
+	}
+	waitForEgressTunnelPolicyLog(t, ctx, since, actorRef, target.Address(), 1)
+	select {
+	case result := <-firstDone:
+		if result.err != nil {
+			t.Errorf("first held TLS fetch: %v", result.err)
+		} else {
+			first := decode(result.raw)
+			if result.status != http.StatusOK || first.StatusCode != http.StatusOK || first.Body != expectedBody || first.Protocol != "HTTP/1.1" || !first.TLS {
+				t.Errorf("first held TLS fetch: HTTP %d, result %+v; want verified HTTP/1.1 response %q", result.status, first, expectedBody)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first held TLS fetch did not complete after the second request")
 	}
 
 	var observed []gatewayAccessLogLine

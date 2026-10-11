@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -84,5 +85,28 @@ func TestHTTPSTestResponseUsesHTTP11AndVerifiedIdentity(t *testing.T) {
 	}
 	if string(body) != "fixture response" {
 		t.Errorf("HTTPS response body = %q, want %q", body, "fixture response")
+	}
+}
+
+func TestHoldEndpointWaitsBeforeReply(t *testing.T) {
+	const delay = 20 * time.Millisecond
+	server := httptest.NewServer(newHTTPHandler("held", delay))
+	defer server.Close()
+
+	start := time.Now()
+	response, err := http.Get(server.URL + "/hold")
+	if err != nil {
+		t.Fatalf("GET /hold: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading /hold body: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != "held" {
+		t.Fatalf("GET /hold = HTTP %d, %q; want HTTP 200, held", response.StatusCode, body)
+	}
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Fatalf("GET /hold returned after %v, before configured delay %v", elapsed, delay)
 	}
 }

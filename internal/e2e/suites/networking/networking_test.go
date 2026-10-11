@@ -368,6 +368,52 @@ func waitForAccessLog(t *testing.T, ctx context.Context, since metav1.Time, want
 	}
 }
 
+func waitForEgressTunnelPolicyLog(t *testing.T, ctx context.Context, since metav1.Time, actorRef resources.ActorRef, destination string, wantRules int) {
+	t.Helper()
+	const timeout = 30 * time.Second
+	deadline := time.Now().Add(timeout)
+	clients := e2e.GetClients()
+	for {
+		pods, err := clients.K8s.CoreV1().Pods(e2e.SystemNamespace()).List(ctx, metav1.ListOptions{LabelSelector: "app=atenet-egress"})
+		if err != nil {
+			t.Fatalf("listing egress gateway pods: %v", err)
+		}
+		for _, pod := range pods.Items {
+			for _, container := range pod.Spec.Containers {
+				if container.Name != "extproc" {
+					continue
+				}
+				logs, err := clients.K8s.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: "extproc", SinceTime: &since}).DoRaw(ctx)
+				if err != nil {
+					t.Fatalf("reading extproc logs from %s/%s: %v", pod.Namespace, pod.Name, err)
+				}
+				for _, line := range strings.Split(string(logs), "\n") {
+					var event struct {
+						Message     string `json:"msg"`
+						Destination string `json:"destination"`
+						SNIRules    int    `json:"sniRules"`
+						Actor       struct {
+							Atespace string `json:"atespace"`
+							Name     string `json:"name"`
+						} `json:"actor"`
+					}
+					if err := json.Unmarshal([]byte(line), &event); err != nil {
+						continue
+					}
+					if strings.Contains(event.Message, "egress tunnel opened") && event.Actor.Atespace == actorRef.Atespace && event.Actor.Name == actorRef.Name && event.Destination == destination && event.SNIRules == wantRules {
+						t.Logf("extproc policy evidence: %s", line)
+						return
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no extproc tunnel-open event for %s to %s with sniRules=%d after %v", actorRef, destination, wantRules, timeout)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 // accessLogField returns the value of the key=value field named key in an Envoy
 // access log line whose fields are separated by spaces.
 func accessLogField(line, key string) (string, bool) {
@@ -824,28 +870,36 @@ func postEgressOnce(t *testing.T, ctx context.Context, router *e2e.RouterClient,
 
 func postEgressWithStatus(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef, path string, input any, wantStatus int) []byte {
 	t.Helper()
+	status, raw, err := postEgressResponse(ctx, router, actorRef, path, input)
+	if err != nil {
+		t.Fatalf("actor %s operation %s failed: %v", actorRef.Name, path, err)
+	}
+	if status != wantStatus {
+		t.Fatalf("actor %s operation %s returned HTTP %d, want %d: %s", actorRef.Name, path, status, wantStatus, raw)
+	}
+	return raw
+}
+
+func postEgressResponse(ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef, path string, input any) (int, []byte, error) {
 	payload, err := json.Marshal(input)
 	if err != nil {
-		t.Fatalf("encoding actor operation: %v", err)
+		return 0, nil, fmt.Errorf("encoding actor operation: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	response, err := router.PostJSON(ctx, actorRef, path, payload)
 	if err != nil {
-		t.Fatalf("actor %s operation %s transport failed: %v", actorRef.Name, path, err)
+		return 0, nil, fmt.Errorf("transport failed: %w", err)
 	}
 	defer response.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 	if err != nil {
-		t.Fatalf("reading actor operation: %v", err)
+		return response.StatusCode, nil, fmt.Errorf("reading actor operation: %w", err)
 	}
 	if len(raw) > 1<<20 {
-		t.Fatal("actor operation response exceeds 1 MiB")
+		return response.StatusCode, nil, fmt.Errorf("actor operation response exceeds 1 MiB")
 	}
-	if response.StatusCode != wantStatus {
-		t.Fatalf("actor %s operation %s returned HTTP %d, want %d: %s", actorRef.Name, path, response.StatusCode, wantStatus, raw)
-	}
-	return raw
+	return response.StatusCode, raw, nil
 }
 
 func assertProtocolGateway(t *testing.T, ctx context.Context, since metav1.Time, actorName, authority string) {

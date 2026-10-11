@@ -27,12 +27,34 @@ import (
 // a test can assert the destination port is recovered from SO_ORIGINAL_DST
 // rather than defaulted from the URL scheme: the actor fetches its /healthz on a
 // non-standard port, and the gateway's access log is expected to carry that
-// port. The optional body makes the same fixture useful for assertions about a
-// response inside the egress tunnel.
-func newHTTPHandler(body string) http.Handler {
+// port. The optional body and delayed /hold response support assertions about
+// an active connection inside the egress tunnel.
+func newHTTPHandler(body string, holdDuration ...time.Duration) http.Handler {
+	var hold time.Duration
+	if len(holdDuration) > 0 {
+		hold = holdDuration[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		if body != "" {
+			_, _ = io.WriteString(w, body)
+		}
+	})
+	mux.HandleFunc("/hold", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if hold > 0 {
+			timer := time.NewTimer(hold)
+			defer timer.Stop()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-timer.C:
+			}
+		}
 		if body != "" {
 			_, _ = io.WriteString(w, body)
 		}
@@ -46,15 +68,16 @@ func newHTTPCmd() *cobra.Command {
 		certFile      string
 		keyFile       string
 		body          string
+		holdDuration  time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "http",
-		Short: "Serve an HTTP/1.1 origin answering /healthz.",
+		Short: "Serve an HTTP/1.1 origin answering /healthz and /hold.",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			server := &http.Server{
 				Addr:              listenAddress,
-				Handler:           newHTTPHandler(body),
+				Handler:           newHTTPHandler(body, holdDuration),
 				ReadHeaderTimeout: 10 * time.Second,
 				WriteTimeout:      2 * time.Minute,
 			}
@@ -65,6 +88,7 @@ func newHTTPCmd() *cobra.Command {
 	cmd.Flags().StringVar(&listenAddress, "listen", ":8080", "Address the HTTP origin listens on.")
 	cmd.Flags().StringVar(&certFile, "tls-cert", "", "PEM certificate file; enables HTTPS when paired with --tls-key.")
 	cmd.Flags().StringVar(&keyFile, "tls-key", "", "PEM private key file; enables HTTPS when paired with --tls-cert.")
-	cmd.Flags().StringVar(&body, "body", "", "Response body for /healthz.")
+	cmd.Flags().StringVar(&body, "body", "", "Response body for /healthz and /hold.")
+	cmd.Flags().DurationVar(&holdDuration, "hold-duration", 0, "Duration to delay /hold responses.")
 	return cmd
 }
