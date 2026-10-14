@@ -27,26 +27,23 @@ import (
 func TestBenchmarkOptionsNameTheSupplyingChannel(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		env    map[string]string
+		flags  map[string]string
 		wantIn []string
 	}{
-		{name: "valid", env: map[string]string{"ATE_BENCHMARK_SANDBOX_CLASS": "microvm"}},
+		{name: "valid", flags: map[string]string{"sandbox-class": "microvm"}},
 		{
-			name:   "sandbox class from the environment",
-			env:    map[string]string{"ATE_BENCHMARK_SANDBOX_CLASS": "nonsense"},
-			wantIn: []string{"benchmark.sandboxClass", "nonsense", "ATE_BENCHMARK_SANDBOX_CLASS"},
+			name:   "invalid sandbox class from the flag",
+			flags:  map[string]string{"sandbox-class": "nonsense"},
+			wantIn: []string{"benchmark.sandboxClass", "nonsense", "--sandbox-class"},
 		},
 		{
-			name:   "worker count from the environment",
-			env:    map[string]string{"ATE_BENCHMARK_WORKER_COUNT": "0"},
-			wantIn: []string{"benchmark.workerCount", "at least 1", "ATE_BENCHMARK_WORKER_COUNT"},
+			name:   "invalid worker count from the flag",
+			flags:  map[string]string{"worker-count": "0"},
+			wantIn: []string{"benchmark.workerCount", "at least 1", "--worker-count"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := config.Resolve(nil, config.ResolveOptions{Env: tc.env})
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
+			r := resolveTestFlags(t, deployBenchmarksPath, tc.flags)
 			cfg := &config.Config{}
 			cfg.SetResolved(r)
 
@@ -54,7 +51,7 @@ func TestBenchmarkOptionsNameTheSupplyingChannel(t *testing.T) {
 			env = &steps.Env{Cfg: cfg}
 			t.Cleanup(func() { env = prev })
 
-			_, err = benchmarkOptions()
+			_, err := benchmarkOptions()
 			if len(tc.wantIn) == 0 {
 				if err != nil {
 					t.Fatalf("benchmarkOptions() = %v, want nil", err)

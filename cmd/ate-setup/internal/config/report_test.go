@@ -21,15 +21,16 @@ import (
 	"testing"
 )
 
-// A value from a file or an exported variable is invisible in the command the
-// operator typed, so every channel has to be named on a run that succeeds --
+// A value from a file is invisible in the command the operator typed, so its
+// source has to be named on a run that succeeds --
 // an install that works with the wrong value never produces an error.
 func TestReportNamesEveryChannel(t *testing.T) {
 	useFixtures(t)
 	fs := flagsWith(t, map[string]string{"fixture-name": "from-flag"})
-	file := &File{Path: "install.yaml", values: map[string]string{"fixture.count": "9"}}
+	file := &File{Path: "install.yaml", values: map[string]string{
+		"fixture.mode": "beta", "fixture.count": "9",
+	}}
 	r, err := Resolve(fs, ResolveOptions{
-		Env:  map[string]string{"FIXTURE_MODE": "beta"},
 		File: file,
 	})
 	if err != nil {
@@ -42,7 +43,7 @@ func TestReportNamesEveryChannel(t *testing.T) {
 
 	for _, want := range []string{
 		"fixture.name", "from-flag", "--fixture-name",
-		"fixture.mode", "beta", "FIXTURE_MODE",
+		"fixture.mode", "beta", "config.fixture.mode",
 		"fixture.count", "9", "config.fixture.count",
 	} {
 		if !strings.Contains(got, want) {
@@ -55,7 +56,7 @@ func TestReportNamesEveryChannel(t *testing.T) {
 // whole registry however much of it is listed.
 func TestReportCountsSuppliedAndDefaulted(t *testing.T) {
 	useFixtures(t)
-	r, err := Resolve(nil, ResolveOptions{Env: map[string]string{"FIXTURE_NAME": "just-one"}})
+	r, err := Resolve(flagsWith(t, map[string]string{"fixture-name": "just-one"}), ResolveOptions{})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -150,7 +151,7 @@ func TestValueDisplay(t *testing.T) {
 // answers where each value came from without the reader looking any up.
 func TestReportListsEverySettingByDefault(t *testing.T) {
 	useFixtures(t)
-	r, err := Resolve(nil, ResolveOptions{Env: map[string]string{"FIXTURE_NAME": "chosen"}})
+	r, err := Resolve(flagsWith(t, map[string]string{"fixture-name": "chosen"}), ResolveOptions{})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}

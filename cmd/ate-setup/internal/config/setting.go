@@ -37,14 +37,13 @@ const (
 	KindDuration
 )
 
-// Setting declares one configurable value. It is the single definition: the
-// flag set, the environment reader and the file schema are all projections of
-// Registry, so a setting cannot reach one channel and miss another.
+// Setting declares one configurable value. The flag set and file schema are
+// projections of Registry; only secret settings also accept environment input.
 type Setting struct {
 	// Key is the canonical name and the path in the configuration file,
 	// dot-separated: "ateapi.postgres.connectionString".
 	Key string
-	// Env is the environment variable that supplies this setting.
+	// Env is the environment variable for a retained secret input.
 	Env string
 	// Flag is the command-line name, without the leading dashes.
 	Flag string
@@ -59,15 +58,13 @@ type Setting struct {
 	// Commands restricts the flag to those command paths, named as they are
 	// typed: "deploy benchmarks". Empty means a persistent flag on the root.
 	//
-	// Only the flag channel is scoped. The environment and the file reach
-	// every setting, because a configuration document describes a whole
-	// install and must parse the same way whichever subcommand reads it.
+	// Only the flag channel is scoped. A configuration document describes a
+	// whole install and parses the same way whichever subcommand reads it.
 	Commands []string
 }
 
 // Registry is the settings the installer itself owns. Each entry is the one
-// place a setting is declared: the flag, the environment variable and the
-// file key are all projections of it.
+// place a setting is declared: the flag and file key are its projections.
 //
 // Settings that belong to one command are added by RegisterCommand instead;
 // All returns both.
@@ -75,56 +72,60 @@ var Registry = []Setting{
 	{
 		// Key is kindCluster.enabled, not kind: a top-level "kind" would collide
 		// with the document's own kind header field.
-		Key: "kindCluster.enabled", Env: "ATE_INSTALL_KIND", Flag: "kind", Kind: KindBool, Default: "false",
+		Key: "kindCluster.enabled", Flag: "kind", Kind: KindBool, Default: "false",
 		Usage: "Target a local Kind cluster: kind overlays, the local registry, and host-architecture builds",
 	},
 	{
-		Key: "kindCluster.name", Env: "KIND_CLUSTER_NAME", Flag: "kind-cluster-name", Kind: KindString, Default: "kind",
+		Key: "kindCluster.name", Flag: "kind-cluster-name", Kind: KindString, Default: "kind",
 		Usage: "Name of the Kind cluster to target",
 	},
 	{
-		Key: "namespace", Env: "ATE_NAMESPACE", Flag: "namespace", Kind: KindString,
+		Key: "namespace", Flag: "namespace", Kind: KindString,
 		Default: installdefaults.SystemNamespace,
 		Usage:   "Namespace the control plane is installed into",
 	},
 	{
-		Key: "kubeconfig", Env: "KUBECONFIG", Flag: "kubeconfig", Kind: KindString,
+		Key: "kubeconfig", Flag: "kubeconfig", Kind: KindString,
 		Usage: "Path to the kubeconfig file",
 	},
 	{
-		Key: "context", Env: "KUBECTL_CONTEXT", Flag: "context", Kind: KindString,
+		Key: "context", Flag: "context", Kind: KindString,
 		Usage: "Name of the kubeconfig context to use",
 	},
 
 	{
-		Key: "gcp.projectID", Env: "PROJECT_ID", Flag: "gcp-project-id", Kind: KindString,
+		Key: "gcp.projectID", Flag: "gcp-project-id", Kind: KindString,
 		Usage: "GCP project holding the target cluster",
 	},
 	{
-		Key: "gcp.clusterName", Env: "CLUSTER_NAME", Flag: "gcp-cluster-name", Kind: KindString,
+		Key: "gcp.clusterName", Flag: "gcp-cluster-name", Kind: KindString,
 		Usage: "GKE cluster name, used to fetch credentials and derive the JWT issuer",
 	},
 	{
-		Key: "gcp.clusterLocation", Env: "CLUSTER_LOCATION", Flag: "gcp-cluster-location", Kind: KindString,
+		Key: "gcp.clusterLocation", Flag: "gcp-cluster-location", Kind: KindString,
 		Usage: "GKE cluster location",
 	},
 
 	{
-		Key: "ko.dockerRepo", Env: "KO_DOCKER_REPO", Flag: "ko-docker-repo", Kind: KindString,
+		Key: "ko.dockerRepo", Flag: "ko-docker-repo", Kind: KindString,
 		Usage: "Registry ko pushes built images to",
 	},
 	{
-		Key: "ko.defaultPlatforms", Env: "KO_DEFAULTPLATFORMS", Flag: "ko-default-platforms", Kind: KindString,
+		Key: "ko.defaultPlatforms", Flag: "ko-default-platforms", Kind: KindString,
 		Usage: "Platforms ko builds for",
 	},
 	{
-		Key: "actorJWT.algorithm", Env: "ACTOR_JWT_ALGORITHM", Flag: "actor-jwt-algorithm",
+		Key: "build.version", Flag: "build-version", Kind: KindString,
+		Usage: "Version stamped into binaries built from source",
+	},
+	{
+		Key: "actorJWT.algorithm", Flag: "actor-jwt-algorithm",
 		Kind: KindString, Default: "ES256",
 		Usage: "Signing algorithm of the key in a new actor JWT pool: ES256 or RS256",
 	},
 	{
 		// The default depends on the namespace, so buildConfig applies it.
-		Key: "actorJWT.issuer", Env: "ACTOR_JWT_ISSUER", Flag: "actor-jwt-issuer", Kind: KindString,
+		Key: "actorJWT.issuer", Flag: "actor-jwt-issuer", Kind: KindString,
 		Usage: "iss claim of actor JWTs, verbatim. Relying parties fetch <issuer>/.well-known/openid-configuration " +
 			"(default https://idp.<namespace>.svc)",
 	},
@@ -132,38 +133,37 @@ var Registry = []Setting{
 		// Whitespace-separated, as the environment variable is. The registry
 		// has no list kind, so the value is carried as written and split
 		// where it is used.
-		Key: "docker.buildFlags", Env: "DOCKER_BUILD_FLAGS", Flag: "docker-build-flags",
+		Key: "docker.buildFlags", Flag: "docker-build-flags",
 		Kind:  KindString,
 		Usage: "Extra docker buildx build flags for the images ko cannot build, whitespace-separated",
 	},
 	{
-		Key: "images.repo", Env: "ATE_IMAGE_REPO", Flag: "image-repo", Kind: KindString,
+		Key: "images.repo", Flag: "image-repo", Kind: KindString,
 		Usage: "Install pre-built images from this registry path instead of building from source",
 	},
 	{
-		Key: "images.tag", Env: "ATE_IMAGE_TAG", Flag: "image-tag", Kind: KindString,
+		Key: "images.tag", Flag: "image-tag", Kind: KindString,
 		Usage: "Tag the pre-built images carry (required with --image-repo)",
 	},
 
 	{
-		Key: "storage.bucketName", Env: "BUCKET_NAME", Flag: "storage-bucket-name", Kind: KindString,
+		Key: "storage.bucketName", Flag: "storage-bucket-name", Kind: KindString,
 		Usage: "Snapshot bucket the demos are templated with",
 	},
 
 	{
-		Key: "atenet.dataplane", Env: "ATE_ATENET_DATAPLANE", Flag: "atenet-dataplane", Kind: KindString,
+		Key: "atenet.dataplane", Flag: "atenet-dataplane", Kind: KindString,
 		Default: RouterEnvoy,
 		Usage:   "Atenet ingress and egress dataplane: envoy or agentgateway",
 	},
 	{
-		Key: "atenet.egress.additionalExtprocService", Env: "ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE",
-		Flag: "experimental-additional-egress-extproc-service", Kind: KindString,
+		Key: "atenet.egress.additionalExtprocService", Flag: "experimental-additional-egress-extproc-service", Kind: KindString,
 		Usage: "Run an additional ext_proc authorization filter served by NS/SVC:PORT " +
 			"(requires --atenet-dataplane=envoy)",
 	},
 
 	{
-		Key: "ateapi.expectedJWTIssuer", Env: "EXPECTED_JWT_ISSUER", Flag: "ateapi-expected-jwt-issuer",
+		Key: "ateapi.expectedJWTIssuer", Flag: "ateapi-expected-jwt-issuer",
 		Kind:  KindString,
 		Usage: "Service account token issuer ate-api-server trusts, overriding derivation and discovery",
 	},
@@ -171,8 +171,7 @@ var Registry = []Setting{
 		// The egress gateway's credential provider, as a JSON object. Upstream
 		// takes it as one value on one flag; it is carried the same way here
 		// so the two channels accept the same text.
-		Key: "atenet.egress.credentialProvider", Env: "ATE_CREDENTIAL_PROVIDER",
-		Flag: "credential-provider", Kind: KindString,
+		Key: "atenet.egress.credentialProvider", Flag: "credential-provider", Kind: KindString,
 		Usage: "Credential provider the egress gateway injects credentials from, as JSON; " +
 			"required by deploy ate-system and deploy atenet. " + credentialProviderUsage +
 			". A provider requires --atenet-dataplane=envoy",
@@ -191,94 +190,84 @@ var Registry = []Setting{
 			"defaulting to the read-write one",
 	},
 	{
-		Key: "ateapi.postgres.readWrite.role", Env: "ATE_API_POSTGRES_READ_WRITE_ROLE",
-		Flag: "ateapi-postgres-read-write-role", Kind: KindString,
+		Key: "ateapi.postgres.readWrite.role", Flag: "ateapi-postgres-read-write-role", Kind: KindString,
 		Default: DefaultPostgresReadWriteRole,
 		Usage:   "PostgreSQL role owning normal application access",
 	},
 	{
-		Key: "ateapi.postgres.owner.role", Env: "ATE_API_POSTGRES_OWNER_ROLE",
-		Flag: "ateapi-postgres-owner-role", Kind: KindString,
+		Key: "ateapi.postgres.owner.role", Flag: "ateapi-postgres-owner-role", Kind: KindString,
 		Default: DefaultPostgresOwnerRole,
 		Usage:   "PostgreSQL role owning the schema",
 	},
 	{
-		Key: "ateapi.postgres.schema", Env: "ATE_API_POSTGRES_SCHEMA", Flag: "ateapi-postgres-schema",
+		Key: "ateapi.postgres.schema", Flag: "ateapi-postgres-schema",
 		Kind:  KindString,
 		Usage: "PostgreSQL schema holding the Substrate tables",
 	},
 	{
-		Key: "ateapi.postgres.poolMaxConns", Env: "ATE_API_POSTGRES_POOL_MAX_CONNS",
-		Flag: "ateapi-postgres-pool-max-conns", Kind: KindString,
+		Key: "ateapi.postgres.poolMaxConns", Flag: "ateapi-postgres-pool-max-conns", Kind: KindString,
 		Usage: "Maximum connections in the apiserver's pgxpool",
 	},
 	{
-		Key: "ateapi.postgres.serverCAFile", Env: "ATE_API_POSTGRES_SERVER_CA_FILE",
-		Flag: "ateapi-postgres-server-ca-file", Kind: KindString,
+		Key: "ateapi.postgres.serverCAFile", Flag: "ateapi-postgres-server-ca-file", Kind: KindString,
 		Usage: "Local PEM file holding an external PostgreSQL server CA",
 	},
 	{
-		Key: "ateapi.postgres.storageClass", Env: "ATE_API_POSTGRES_STORAGE_CLASS",
-		Flag: "ateapi-postgres-storage-class", Kind: KindString,
+		Key: "ateapi.postgres.storageClass", Flag: "ateapi-postgres-storage-class", Kind: KindString,
 		Usage: "StorageClass for the bundled PostgreSQL volume, instead of the cluster default. " +
 			"An existing install must delete the postgres StatefulSet and its claim first",
 	},
 	{
-		Key: "ateapi.postgres.cloudsql.instance", Env: "ATE_API_POSTGRES_CLOUDSQL_INSTANCE",
-		Flag: "ateapi-postgres-cloudsql-instance", Kind: KindString,
+		Key: "ateapi.postgres.cloudsql.instance", Flag: "ateapi-postgres-cloudsql-instance", Kind: KindString,
 		Usage: "Cloud SQL instance connection name, PROJECT:REGION:INSTANCE",
 	},
 	{
-		Key: "ateapi.postgres.cloudsql.gsa", Env: "ATE_API_POSTGRES_CLOUDSQL_GSA",
-		Flag: "ateapi-postgres-cloudsql-gsa", Kind: KindString,
+		Key: "ateapi.postgres.cloudsql.gsa", Flag: "ateapi-postgres-cloudsql-gsa", Kind: KindString,
 		Usage: "Google service account the Cloud SQL Auth Proxy authenticates as",
 	},
 	{
-		Key: "ateapi.postgres.cloudsql.iamAuth", Env: "ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH",
-		Flag: "ateapi-postgres-cloudsql-iam-auth", Kind: KindString,
+		Key: "ateapi.postgres.cloudsql.iamAuth", Flag: "ateapi-postgres-cloudsql-iam-auth", Kind: KindString,
 		Usage: "Enable automatic IAM database authentication: true or false",
 	},
 	{
-		Key: "ateapi.postgres.cloudsql.ipType", Env: "ATE_API_POSTGRES_CLOUDSQL_IP_TYPE",
-		Flag: "ateapi-postgres-cloudsql-ip-type", Kind: KindString,
+		Key: "ateapi.postgres.cloudsql.ipType", Flag: "ateapi-postgres-cloudsql-ip-type", Kind: KindString,
 		Usage: "Instance address the Cloud SQL proxy dials: private, public or psc",
 	},
 
 	{
-		Key: "podcert.workersPerSigner", Env: "ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER",
-		Flag: "podcert-workers-per-signer", Kind: KindInt, Default: "0",
+		Key: "podcert.workersPerSigner", Flag: "podcert-workers-per-signer", Kind: KindInt, Default: "0",
 		Usage: "Worker goroutines per signer in podcertificate-controller",
 	},
 
 	{
-		Key: "rolloutTimeout", Env: "ATE_INSTALL_ROLLOUT_TIMEOUT", Flag: "rollout-timeout",
+		Key: "rolloutTimeout", Flag: "rollout-timeout",
 		Kind: KindDuration, Default: DefaultRolloutTimeout.String(),
 		Usage: "Timeout for workload rollouts, as a duration string",
 	},
 	{
-		Key: "clusterSize", Env: "ATE_INSTALL_CLUSTER_SIZE", Flag: "cluster-size", Kind: KindString,
+		Key: "clusterSize", Flag: "cluster-size", Kind: KindString,
 		Default: ClusterSizeSize0,
 		Usage:   "Coarse-grained sizing of Substrate: size0 or size10",
 	},
 	{
-		Key: "cordonControlPlane", Env: "ATE_INSTALL_CORDON_CONTROL_PLANE", Flag: "cordon-control-plane",
+		Key: "cordonControlPlane", Flag: "cordon-control-plane",
 		Kind: KindBool, Default: "false",
 		Usage: "Keep the control plane off the worker nodes. Assumes a small shared pool labeled " +
 			"and tainted ate.dev/workloadType=ate-control-plane:NoSchedule, and a one-node pool " +
 			"labeled and tainted ate.dev/workloadType=ate-postgres:NoSchedule for postgres alone",
 	},
 	{
-		Key: "otlpEndpoint", Env: "ATE_OTLP_ENDPOINT", Flag: "otlp-endpoint", Kind: KindString,
+		Key: "otlpEndpoint", Flag: "otlp-endpoint", Kind: KindString,
 		Usage: "Send control plane telemetry to this OTLP collector instead of the cluster default",
 	},
 
 	{
-		Key: "benchmark.actorMemory", Env: "BENCHMARK_ACTOR_MEMORY", Flag: "benchmark-actor-memory",
+		Key: "benchmark.actorMemory", Flag: "benchmark-actor-memory",
 		Kind:  KindString,
 		Usage: "Memory limit for benchmark actors",
 	},
 	{
-		Key: "record.dir", Env: "ATE_RECORD_DIR", Flag: "record-dir", Kind: KindString,
+		Key: "record.dir", Flag: "record-dir", Kind: KindString,
 		Usage: "Directory install records are written to (default: the user cache directory)",
 	},
 	{
@@ -288,8 +277,7 @@ var Registry = []Setting{
 	},
 }
 
-// kindEnabledKey is resolved before the rest, because whether to source the
-// developer environment depends on it.
+// kindEnabledKey identifies the Kind profile setting.
 const kindEnabledKey = "kindCluster.enabled"
 
 // scoped holds the settings commands registered for themselves, in
@@ -321,15 +309,15 @@ func RegisterCommand(settings ...Setting) {
 }
 
 // All returns every setting, installer-owned and command-registered, in
-// declaration order. The file and the environment read this, so a
-// configuration document parses identically whichever subcommand runs.
+// declaration order. A configuration document parses identically whichever
+// subcommand reads it.
 func All() []Setting {
 	out := make([]Setting, 0, len(Registry)+len(scoped))
 	out = append(out, Registry...)
 	return append(out, scoped...)
 }
 
-// Validate reports duplicate names and missing channels across the merged set.
+// Validate reports duplicate names and missing inputs across the merged set.
 //
 // It cannot run inside package config's own tests: the settings it is meant to
 // catch are registered by the command packages, which config does not import.
@@ -345,7 +333,8 @@ func Validate() error {
 		omittable func(Setting) bool
 	}{
 		{name: "key", get: func(s Setting) string { return s.Key }},
-		{name: "environment variable", get: func(s Setting) string { return s.Env }},
+		{name: "environment variable", get: func(s Setting) string { return s.Env },
+			omittable: func(s Setting) bool { return !s.Secret }},
 		{
 			name: "flag", get: func(s Setting) string { return s.Flag },
 			omittable: func(s Setting) bool { return s.Secret },
@@ -374,6 +363,12 @@ func Validate() error {
 	// Secrets are supplied through the environment or a file an operator can
 	// permission.
 	for _, s := range All() {
+		if s.Secret && s.Env == "" {
+			problems = append(problems, fmt.Sprintf("secret setting %q has no environment variable", s.Key))
+		}
+		if !s.Secret && s.Env != "" {
+			problems = append(problems, fmt.Sprintf("ordinary setting %q declares environment variable %q", s.Key, s.Env))
+		}
 		if s.Secret && s.Flag != "" {
 			problems = append(problems,
 				fmt.Sprintf("secret setting %q declares flag %q; a credential must not be a flag",
@@ -390,15 +385,12 @@ func Validate() error {
 
 // Channels names every way the setting can be supplied.
 //
-// Errors raised where no resolved value is at hand use it, because the reader
-// may know only one of the three: telling someone who configures by file to
-// set an environment variable sends them to the wrong place. A setting with
-// no flag -- a secret -- names the two it has.
+// Errors name only inputs the setting supports.
 func (s Setting) Channels() string {
 	if s.Flag == "" {
 		return fmt.Sprintf("%s or config.%s", s.Env, s.Key)
 	}
-	return fmt.Sprintf("%s, config.%s or --%s", s.Env, s.Key, s.Flag)
+	return fmt.Sprintf("config.%s or --%s", s.Key, s.Flag)
 }
 
 // channelsFor names the channels of a registered key, for a caller holding
@@ -474,8 +466,8 @@ func (s Setting) bindable() bool { return s.Flag != "" && !s.Secret }
 // Only bools get a typed flag. Ints and durations register as strings so that
 // Setting.parse is the one thing deciding what they accept: pflag's Int reads
 // base 0, so it takes "0x10" as 16 where parse rejects it, and its errors name
-// no canonical key. One vocabulary across all three channels is worth more
-// than the type shown in help.
+// no canonical key. One vocabulary across the file and flag channels is worth
+// more than the type shown in help.
 func bind(fs *pflag.FlagSet, s Setting) {
 	if s.Kind == KindBool {
 		// An empty Default yields nil from parse; the assertion then gives

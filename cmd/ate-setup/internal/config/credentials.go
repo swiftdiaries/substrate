@@ -27,17 +27,15 @@ import (
 // EnsureClusterCredentials fetches GKE credentials when the configuration
 // names a project but no explicit context.
 //
-// This reproduces the prologue of the shell installer: a developer whose
-// .ate-dev-env.sh sets PROJECT_ID gets their kubeconfig populated before
-// anything talks to the cluster. Setting a context (or KUBECTL_CONTEXT) is
-// taken as "I already have credentials" and skips the call, as it did there.
+// A configuration naming a project gets its kubeconfig populated before any
+// client is built. Setting a context is taken as "I already have credentials"
+// and skips the call.
 func (c *Config) EnsureClusterCredentials(ctx context.Context) error {
 	if c.Kind || c.Context != "" || c.ProjectID == "" {
 		return nil
 	}
-	if c.ClusterName == "" || c.ClusterLocation == "" {
-		return fmt.Errorf("PROJECT_ID is set but CLUSTER_NAME and CLUSTER_LOCATION are not; "+
-			"set them in %s or pass --context to use an already-configured cluster", devEnvFile)
+	if err := c.ValidateClusterCredentials(); err != nil {
+		return err
 	}
 
 	log.Stepf("gcloud container clusters get-credentials %s", c.ClusterName)
@@ -52,6 +50,16 @@ func (c *Config) EnsureClusterCredentials(ctx context.Context) error {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("while fetching credentials for cluster %s: %w", c.ClusterName, err)
+	}
+	return nil
+}
+
+// ValidateClusterCredentials checks the coordinates needed for a credential
+// fetch without running gcloud or reading kubeconfig.
+func (c *Config) ValidateClusterCredentials() error {
+	if !c.Kind && c.Context == "" && c.ProjectID != "" && (c.ClusterName == "" || c.ClusterLocation == "") {
+		return fmt.Errorf("GKE project is configured but cluster name and location are missing; " +
+			"set them with --gcp-cluster-name and --gcp-cluster-location, or pass --context to use an already-configured cluster")
 	}
 	return nil
 }

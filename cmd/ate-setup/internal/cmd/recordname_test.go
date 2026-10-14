@@ -30,15 +30,12 @@ func recordFor(t *testing.T, dir string, vars map[string]string) string {
 	t.Helper()
 	// record.dir is read from the resolved settings, so it has to be part of
 	// the resolve rather than set in the process environment afterwards.
-	withDir := map[string]string{"ATE_RECORD_DIR": dir}
+	withDir := map[string]string{"record-dir": dir}
 	for k, v := range vars {
 		withDir[k] = v
 	}
-	r, err := config.Resolve(nil, config.ResolveOptions{Env: withDir})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	cfg := &config.Config{}
+	r := resolveTestFlags(t, "deploy atenet", withDir)
+	cfg := &config.Config{BuildVersion: r.String("build.version")}
 	cfg.SetResolved(r)
 
 	prevEnv, prevResolved := env, resolved
@@ -68,7 +65,7 @@ func TestRecordIsNamedForTheClusterNotTheFlag(t *testing.T) {
 
 	// A Kind install resolves to the kind-kind context without anyone passing
 	// --context, so its record must not be the unkeyed one.
-	path := recordFor(t, dir, map[string]string{"ATE_INSTALL_KIND": "true"})
+	path := recordFor(t, dir, map[string]string{"kind": "true"})
 	if name := filepath.Base(path); strings.HasPrefix(name, "unkeyed") {
 		t.Errorf("a Kind install wrote %s; it resolves to the kind-kind context", name)
 	}
@@ -80,8 +77,9 @@ func TestRecordIsNamedForTheClusterNotTheFlag(t *testing.T) {
 func TestTwoClustersDoNotShareARecord(t *testing.T) {
 	dir := t.TempDir()
 
-	first := recordFor(t, dir, map[string]string{"ATE_INSTALL_KIND": "true"})
-	second := recordFor(t, dir, map[string]string{"KUBECONFIG": "/nonexistent/other"})
+	first := recordFor(t, dir, map[string]string{"kind": "true"})
+	t.Setenv("KUBECONFIG", "/nonexistent/other")
+	second := recordFor(t, dir, nil)
 
 	if first == second {
 		t.Errorf("both installs wrote %s; one cluster's record replaced the other's", first)

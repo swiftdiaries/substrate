@@ -56,13 +56,13 @@ type cloudSQLSettings struct {
 	IAMAuth  string
 	IPType   string
 	// Adopted records that Instance came from the cluster rather than from
-	// the environment. Only then are the remaining settings inherited too.
+	// this invocation. Only then are the remaining settings inherited too.
 	Adopted bool
 }
 
 // cloudSQLSettingsFrom folds the configured intent over the settings the
 // cluster records in the ate-api-server-envvars ConfigMap. recorded is
-// consulted only when ATE_API_POSTGRES_CLOUDSQL_INSTANCE is unset, so a
+// consulted only when the instance setting is absent, so a
 // redeploy that does not mention Cloud SQL regresses nothing to defaults.
 func cloudSQLSettingsFrom(c config.CloudSQLConfig, recorded map[string]string) cloudSQLSettings {
 	s := cloudSQLSettings{
@@ -164,13 +164,13 @@ func (e *Env) resolveCloudSQL(ctx context.Context) (cloudSQLSettings, error) {
 // failing here beats a PostgreSQL authentication error at pod startup.
 func cloudSQLDSN(s cloudSQLSettings) (string, error) {
 	if s.IAMAuth == "false" {
-		return "", fmt.Errorf("ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH=false disables automatic IAM database " +
+		return "", fmt.Errorf("ateapi.postgres.cloudsql.iamAuth=false disables automatic IAM database " +
 			"authentication, so a passwordless DSN cannot be synthesized; set " +
-			"ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING explicitly (host=127.0.0.1 to stay on the proxy)")
+			"ateapi.postgres.readWrite.connectionString (host=127.0.0.1 to stay on the proxy)")
 	}
 	if s.GSA == "" {
-		return "", fmt.Errorf("ATE_API_POSTGRES_CLOUDSQL_INSTANCE requires ATE_API_POSTGRES_CLOUDSQL_GSA " +
-			"(or an explicit ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING)")
+		return "", fmt.Errorf("ateapi.postgres.cloudsql.instance requires ateapi.postgres.cloudsql.gsa " +
+			"(or an explicit ateapi.postgres.readWrite.connectionString)")
 	}
 	user := strings.TrimSuffix(s.GSA, gsaEmailSuffix)
 	return fmt.Sprintf("user=%s host=127.0.0.1 port=5432 dbname=atepg sslmode=disable", user), nil
@@ -209,8 +209,7 @@ func cloudSQLEnvVars(s cloudSQLSettings) map[string]string {
 // the sidecar-free base.
 //
 // Desired state comes from resolveCloudSQL, so the removal branch fires only
-// on an explicitly empty ATE_API_POSTGRES_CLOUDSQL_INSTANCE, never because a
-// redeploy ran from a shell that simply did not export it.
+// on an explicitly empty instance setting, never because a redeploy omitted it.
 func (e *Env) reconcileCloudSQLProxySidecar(ctx context.Context) error {
 	s, err := e.resolveCloudSQL(ctx)
 	if err != nil {

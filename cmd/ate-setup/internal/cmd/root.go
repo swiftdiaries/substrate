@@ -33,14 +33,8 @@ import (
 // read back off the flag set in PersistentPreRunE.
 var (
 	configPath       string
-	noDevEnv         bool
 	noReportDefaults bool
 )
-
-// NoReportDefaultsEnv shortens the configuration report without the flag, for
-// a caller that runs ate-setup repeatedly and does not want the full listing
-// each time.
-const NoReportDefaultsEnv = "ATE_NO_REPORT_DEFAULTS"
 
 // env is the shared execution context, built once per invocation.
 var env *steps.Env
@@ -77,12 +71,11 @@ var rootCmd = &cobra.Command{
 secrets and config, and the bundled demos.
 
 Cluster selection follows kubeconfig: pass --context to target a specific
-cluster, or set KUBECTL_CONTEXT. Use --kind for a local Kind cluster, which
+cluster. Use --kind for a local Kind cluster, which
 selects the kind manifest overlays, the local image registry, and host-only
-image builds.
-
-Developer settings are read from .ate-dev-env.sh at the repository root when it
-is present (skipped for --kind, and by NO_DEV_ENV=1).`,
+image builds. Ordinary settings come from defaults, --config, or flags; only
+the PostgreSQL connection strings and Anthropic API key accept environment
+input.`,
 	Version:      version.String(),
 	SilenceUsage: true,
 	// Execute prints the error itself. Without this cobra prints it too, and
@@ -96,7 +89,6 @@ is present (skipped for --kind, and by NO_DEV_ENV=1).`,
 		// settings live there. The complete set is local plus inherited.
 		cfg, err := config.LoadFlags(cmd.Flags(), config.LoadOptions{
 			ConfigPath: configPath,
-			NoDevEnv:   noDevEnv,
 		})
 		if err != nil {
 			return err
@@ -107,8 +99,7 @@ is present (skipped for --kind, and by NO_DEV_ENV=1).`,
 		// screen even when connecting fails.
 		resolved.Report(log.Writer(), config.ReportOptions{OmitDefaults: noReportDefaults})
 
-		// Populate the kubeconfig before any client is built, for the
-		// GKE-from-.ate-dev-env.sh flow.
+		// Populate GKE credentials before any client is built.
 		if err := cfg.EnsureClusterCredentials(cmd.Context()); err != nil {
 			return err
 		}
@@ -214,11 +205,9 @@ func init() {
 	// environment and the file but miss the command line.
 	config.BindFlags(f)
 	f.StringVar(&configPath, "config", "",
-		"Path to the installation configuration file (or "+config.ConfigPathEnv+"). Its settings "+
-			"outrank the environment and are outranked by flags")
-	f.BoolVar(&noDevEnv, "no-dev-env", false, "Do not source .ate-dev-env.sh")
-	f.BoolVar(&noReportDefaults, "no-report-defaults", os.Getenv(NoReportDefaultsEnv) != "",
-		"List only the settings something set in the configuration report (or "+NoReportDefaultsEnv+")")
+		"Path to the installation configuration file; its settings are overridden by flags")
+	f.BoolVar(&noReportDefaults, "no-report-defaults", false,
+		"List only the settings something set in the configuration report")
 
 	// Cobra's default completion command would run PersistentPreRunE and
 	// require a cluster; the tree is not deep enough to justify that.

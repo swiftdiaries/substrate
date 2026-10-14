@@ -99,13 +99,13 @@ cluster-wide, so it is left in place by default.`,
 func init() {
 	config.RegisterCommand(
 		config.Setting{
-			Key: "benchmark.workerCount", Env: "ATE_BENCHMARK_WORKER_COUNT",
+			Key:  "benchmark.workerCount",
 			Flag: "worker-count", Kind: config.KindInt, Default: "1",
 			Commands: []string{deployBenchmarksPath, deleteBenchmarksPath},
 			Usage:    "Number of WorkerPool replicas",
 		},
 		config.Setting{
-			Key: "benchmark.sandboxClass", Env: "ATE_BENCHMARK_SANDBOX_CLASS",
+			Key:  "benchmark.sandboxClass",
 			Flag: "sandbox-class", Kind: config.KindString, Default: config.SandboxClassGvisor,
 			Commands: []string{deployBenchmarksPath, deleteBenchmarksPath},
 			Usage:    "Sandbox runtime for the benchmark WorkerPool: gvisor or microvm",

@@ -40,6 +40,9 @@ import (
 // stubGo is a `go` that records the arguments of every `go run ./cmd/ate-setup`
 // the script makes, one invocation per line, and succeeds.
 const stubGo = `#!/usr/bin/env bash
+if [[ -n "${SHIM_TEST_KUBECONFIG:-}" && "${KUBECONFIG:-}" != "${SHIM_TEST_KUBECONFIG}" ]]; then
+  exit 1
+fi
 if [[ "$*" == "env GOARCH" ]]; then
   echo arm64
   exit 0
@@ -66,9 +69,8 @@ func runInstaller(t *testing.T, name, dir string, env []string, args ...string) 
 	script := exec.Command("bash", filepath.Join(root, "hack", name))
 	script.Args = append(script.Args, args...)
 	script.Dir = dir
-	// A fixed environment: the script reads SETUP_CSI and STORAGE_CLASS, so a
-	// developer who exports either would otherwise change the expected output.
-	// git needs PATH, and the stub go has to come first on it.
+	// A fixed environment keeps native tool lookup predictable while allowing
+	// each case to add hostile ordinary environment values.
 	script.Env = append([]string{
 		"PATH=" + bin + ":" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
@@ -106,7 +108,7 @@ func TestKindShimPassesTheKindProfileWithoutOverridingConfig(t *testing.T) {
 		"KUBECTL_CONTEXT=ambient-context",
 		"BUCKET_NAME=ambient-bucket",
 	}, "--deploy-ate-system")
-	if code != 0 || strings.Join(got, "\n") != "run ./cmd/ate-setup --kind deploy ate-system --setup-csi=none" {
+	if code != 0 || strings.Join(got, "\n") != "run ./cmd/ate-setup --kind deploy ate-system" {
 		t.Fatalf("invocations = %q, exit = %d", got, code)
 	}
 }
@@ -294,7 +296,7 @@ func TestShimTranslatesFlags(t *testing.T) {
 	}, {
 		name: "no CSI driver by default",
 		args: []string{"--deploy-ate-system"},
-		want: []string{"deploy ate-system --setup-csi=none"},
+		want: []string{"deploy ate-system"},
 	}, {
 		// The value-bearing flags were pre-scanned, so they shape every action
 		// regardless of where they appear.
@@ -304,11 +306,15 @@ func TestShimTranslatesFlags(t *testing.T) {
 	}, {
 		name: "kind config and Docker flags reach every action",
 		args: []string{"--deploy-ate-system", "--kind", "--config", "install.yaml", "--docker-build-flags", "--no-cache"},
-		want: []string{"--kind --config=install.yaml --docker-build-flags=--no-cache deploy ate-system --setup-csi=none"},
+		want: []string{"--kind --config=" + filepath.Join(repoRoot(t), "install.yaml") + " --docker-build-flags=--no-cache deploy ate-system"},
 	}, {
 		name: "cluster profile flags are forwarded in either value form",
 		args: []string{"--deploy-ate-system", "--cluster-size", "size10", "--cordon-control-plane"},
-		want: []string{"--cluster-size=size10 --cordon-control-plane deploy ate-system --setup-csi=none"},
+		want: []string{"--cluster-size=size10 --cordon-control-plane deploy ate-system"},
+	}, {
+		name: "kind settings are forwarded with custom context",
+		args: []string{"--deploy-ate-system", "--kind", "--kind-cluster-name", "dev", "--context", "kind-dev"},
+		want: []string{"--kind --kind-cluster-name=dev --context=kind-dev deploy ate-system"},
 	}, {
 		name: "--cluster-size takes an attached value",
 		args: []string{"--cluster-size=size10", "--deploy-ate-apiserver"},
@@ -320,7 +326,7 @@ func TestShimTranslatesFlags(t *testing.T) {
 	}, {
 		name: "--credential-provider takes an attached value",
 		args: []string{`--credential-provider={"name":"k8s.io"}`, "--deploy-ate-system"},
-		want: []string{`--credential-provider={"name":"k8s.io"} deploy ate-system --setup-csi=none`},
+		want: []string{`--credential-provider={"name":"k8s.io"} deploy ate-system`},
 	}, {
 		name: "actions run in command line order",
 		args: []string{"--deploy-ate-apiserver", "--deploy-atelet", "--delete-atenet"},
@@ -364,6 +370,10 @@ func TestShimTranslatesFlags(t *testing.T) {
 			"delete benchmarks --worker-count=4 --sandbox-class=microvm",
 		},
 	}, {
+		name: "benchmark actor memory is forwarded as a setting flag",
+		args: []string{"--benchmark-actor-memory", "512Mi", "--deploy-benchmarks"},
+		want: []string{"--benchmark-actor-memory=512Mi deploy benchmarks"},
+	}, {
 		name: "demo flags drop the demo- prefix",
 		args: []string{"--deploy-demo-egress-microvm", "--delete-demo-counter-microvm"},
 		want: []string{
@@ -371,23 +381,34 @@ func TestShimTranslatesFlags(t *testing.T) {
 			"delete demo counter-microvm",
 		},
 	}, {
-		name: "the counter external volume defaults to the standard storage class",
+		name: "omitted counter storage class is left to config",
 		args: []string{"--deploy-demo-counter-with-external-volume"},
-		want: []string{"deploy demo counter --with-external-volume --storage-class=standard"},
+		want: []string{"deploy demo counter --with-external-volume"},
 	}, {
-		name: "the counter external volume follows --setup-csi",
+		name: "the counter keeps config storage class after CSI setup",
 		args: []string{"--setup-csi=hostpath", "--deploy-demo-counter-with-external-volume"},
 		want: []string{
 			"setup csi hostpath",
-			"deploy demo counter --with-external-volume --storage-class=csi-hostpath-sc",
+			"deploy demo counter --with-external-volume",
 		},
 	}, {
-		name: "STORAGE_CLASS beats the driver --setup-csi installed",
+		name: "ambient STORAGE_CLASS is ignored",
 		env:  []string{"STORAGE_CLASS=my-class"},
 		args: []string{"--setup-csi=nfs", "--deploy-demo-counter-with-external-volume"},
 		want: []string{
 			"setup csi nfs",
-			"deploy demo counter --with-external-volume --storage-class=my-class",
+			"deploy demo counter --with-external-volume",
+		},
+	}, {
+		name: "explicit counter storage class is forwarded",
+		args: []string{"--deploy-demo-counter-with-external-volume", "--storage-class", "csi-nfs-sc"},
+		want: []string{"deploy demo counter --with-external-volume --storage-class=csi-nfs-sc"},
+	}, {
+		name: "counter boolean flag does not consume the following action",
+		args: []string{"--with-external-volume", "--deploy-demo-counter", "--delete-all"},
+		want: []string{
+			"deploy demo counter --with-external-volume",
+			"delete all",
 		},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -406,29 +427,79 @@ func TestShimTranslatesFlags(t *testing.T) {
 	}
 }
 
-// --benchmark-actor-memory has no ate-setup flag; the script exports it, which
-// the stub go cannot observe through its arguments.
-func TestShimExportsBenchmarkActorMemory(t *testing.T) {
+func TestShimResolvesRelativeConfigFromCallerDirectory(t *testing.T) {
 	root := repoRoot(t)
-	bin := t.TempDir()
-	const reportEnv = `#!/usr/bin/env bash
-printf '%s\n' "BENCHMARK_ACTOR_MEMORY=${BENCHMARK_ACTOR_MEMORY:-<unset>}"
-`
-	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(reportEnv), 0o755); err != nil {
-		t.Fatalf("writing the stub go: %v", err)
+	callerDir := filepath.Join(root, "shim-caller")
+	if err := os.MkdirAll(callerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(callerDir) })
+	got, code := runInstaller(t, "install-ate.sh", callerDir, nil,
+		"--config", "install.yaml", "--namespace", "from-flag", "--deploy-ate-system")
+	want := "run ./cmd/ate-setup --config=" + filepath.Join(callerDir, "install.yaml") + " --namespace=from-flag deploy ate-system"
+	if code != 0 || strings.Join(got, "\n") != want {
+		t.Fatalf("invocations = %q, exit = %d, want %q", got, code, want)
+	}
+}
+
+func TestShimResolvesKubeconfigFromCallerDirectory(t *testing.T) {
+	callerDir := filepath.Join(repoRoot(t), "cmd")
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{value: "cluster.yaml", want: filepath.Join(callerDir, "cluster.yaml")},
+		{value: "cluster:west.yaml", want: filepath.Join(callerDir, "cluster:west.yaml")},
+		{value: "/absolute/cluster.yaml", want: "/absolute/cluster.yaml"},
+		{value: "", want: ""},
+	} {
+		for _, form := range []string{"equals", "separated"} {
+			t.Run(tc.value+"/"+form, func(t *testing.T) {
+				args := []string{"--kubeconfig=" + tc.value}
+				if form == "separated" {
+					args = []string{"--kubeconfig", tc.value}
+				}
+				got, code := runInstaller(t, "install-ate.sh", callerDir, nil, append(args, "--deploy-ate-system")...)
+				want := goRunPrefix + "--kubeconfig=" + tc.want + " deploy ate-system"
+				if code != 0 || strings.Join(got, "\n") != want {
+					t.Fatalf("invocations = %q, exit = %d; want %q", got, code, want)
+				}
+			})
+		}
 	}
 
-	script := exec.Command("bash", filepath.Join(root, "hack", "install-ate.sh"),
-		"--benchmark-actor-memory", "512Mi", "--deploy-benchmarks")
-	script.Dir = root
-	script.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "TMPDIR=/tmp"}
-
-	out, err := script.CombinedOutput()
-	if err != nil {
-		t.Fatalf("running install-ate.sh: %v\n%s", err, out)
+	wantEnv := ":" + filepath.Join(callerDir, "relative.yaml") + "::/absolute.yaml:"
+	got, code := runInstaller(t, "install-ate.sh", callerDir, []string{
+		"KUBECONFIG=:relative.yaml::/absolute.yaml:",
+		"SHIM_TEST_KUBECONFIG=" + wantEnv,
+	}, "--deploy-ate-system")
+	if code != 0 || len(got) != 1 {
+		t.Fatalf("ambient kubeconfig was not resolved from the caller: invocations = %q, exit = %d", got, code)
 	}
-	if want := "BENCHMARK_ACTOR_MEMORY=512Mi\n"; string(out) != want {
-		t.Errorf("stub go saw %q, want %q", out, want)
+}
+
+func TestShimDoesNotOverrideSettingsFromConfig(t *testing.T) {
+	root := repoRoot(t)
+	callerDir := filepath.Join(root, "shim-config")
+	if err := os.MkdirAll(callerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(callerDir) })
+	configPath := filepath.Join(callerDir, "install.yaml")
+	body := "apiVersion: " + config.FileAPIVersion + "\nkind: " + config.FileKind + "\n" +
+		"csi:\n  setup: hostpath\n" +
+		"demo:\n  counter:\n    storageClass: from-file\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, code := runInstaller(t, "install-ate.sh", callerDir, nil,
+		"--config", "install.yaml", "--deploy-ate-system", "--deploy-demo-counter-with-external-volume")
+	want := strings.Join([]string{
+		"run ./cmd/ate-setup --config=" + configPath + " deploy ate-system",
+		"run ./cmd/ate-setup --config=" + configPath + " deploy demo counter --with-external-volume",
+	}, "\n")
+	if code != 0 || strings.Join(got, "\n") != want {
+		t.Fatalf("invocations = %q, exit = %d, want %q", got, code, want)
 	}
 }
 
@@ -447,6 +518,16 @@ func TestShimRejectsUnknownFlags(t *testing.T) {
 				t.Errorf("ran %q, want nothing", got)
 			}
 		})
+	}
+}
+
+func TestShimRejectsMissingDockerBuildFlagsValue(t *testing.T) {
+	got, exitCode := runShim(t, nil, "--docker-build-flags", "--deploy-ate-system")
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+	if len(got) != 0 {
+		t.Errorf("ran %q, want nothing", got)
 	}
 }
 
@@ -607,13 +688,6 @@ func TestOperatorDocListsEverySetting(t *testing.T) {
 // following it would configure nothing and the install would silently use a
 // default.
 func TestDocsNameNoRemovedSetting(t *testing.T) {
-	// The two controls that select how configuration is read and reported.
-	// They are not settings themselves, so no registry entry declares them.
-	notSettings := map[string]bool{
-		"ATE_CONFIG":             true,
-		"ATE_NO_REPORT_DEFAULTS": true,
-	}
-
 	declared := map[string]bool{}
 	for _, s := range config.All() {
 		declared[s.Env] = true
@@ -631,7 +705,7 @@ func TestDocsNameNoRemovedSetting(t *testing.T) {
 		seen := map[string]bool{}
 		for _, m := range regexp.MustCompile(`\b(ATE_[A-Z0-9_]{3,})\b`).FindAllStringSubmatch(string(raw), -1) {
 			name := m[1]
-			if declared[name] || notSettings[name] || seen[name] {
+			if declared[name] || seen[name] {
 				continue
 			}
 			seen[name] = true

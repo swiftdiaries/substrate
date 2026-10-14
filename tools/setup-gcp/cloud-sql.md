@@ -119,9 +119,10 @@ users need a separate migration of ownership and grants.
 ## 3. Deploy
 
 ```sh
-export ATE_API_POSTGRES_CLOUDSQL_INSTANCE=<project>:<region>:<instance>
-export ATE_API_POSTGRES_CLOUDSQL_GSA=ate-api-server@<project>.iam.gserviceaccount.com
-./hack/install-ate.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}'
+./hack/install-ate.sh --deploy-ate-system \
+  --ateapi-postgres-cloudsql-instance=<project>:<region>:<instance> \
+  --ateapi-postgres-cloudsql-gsa=ate-api-server@<project>.iam.gserviceaccount.com \
+  --credential-provider='{"name":"k8s.io"}'
 # Existing installation: --deploy-ate-apiserver instead of --deploy-ate-system
 ```
 
@@ -138,27 +139,28 @@ What this does differently from a plain install:
   `cloud-sql-proxy` native sidecar (initContainer with
   `restartPolicy: Always`; requires Kubernetes 1.29+) into the deployment.
   The sidecar's `/startup` probe gates ateapi, so ateapi never races the
-  tunnel. Leaving `ATE_API_POSTGRES_CLOUDSQL_INSTANCE` **unset** on later
+  tunnel. Leaving `ateapi.postgres.cloudsql.instance` absent on later
   redeploys keeps the current Cloud SQL configuration (it is adopted from
   the cluster's record); to remove the sidecar and annotation, set it to
-  the empty string explicitly: `ATE_API_POSTGRES_CLOUDSQL_INSTANCE=""`.
+  the empty string explicitly with `--ateapi-postgres-cloudsql-instance=` or
+  an empty config value.
 
-Optional environment variables:
+Optional ate-setup flags (or the matching configuration-file settings):
 
-- `ATE_API_POSTGRES_CLOUDSQL_IP_TYPE` — `private` (default), `public`, `psc`.
+- `--ateapi-postgres-cloudsql-ip-type` — `private` (default), `public`, `psc`.
   Selects which of the instance's addresses the proxy dials, for connecting
   to instances provisioned outside this tool: `setup-gcp create cloudsql`
   itself only creates private-services-access (private IP) instances —
   `public` and `psc` require an instance configured accordingly out-of-band.
-- `ATE_API_POSTGRES_READ_WRITE_ROLE` and `ATE_API_POSTGRES_OWNER_ROLE` — required stable
+- `--ateapi-postgres-read-write-role` and `--ateapi-postgres-owner-role` — required stable
   `NOLOGIN` roles (defaults: `substrate_readwrite` and `substrate_owner`).
   If you override them, create the custom roles and substitute their names in
   the grants in section 2. `ateapi` runs `SET ROLE` on every new connection;
   stable roles keep grants and object ownership across IAM username rotations.
-- `ATE_API_POSTGRES_SCHEMA` — the schema holding the store's tables
+- `--ateapi-postgres-schema` — the schema holding the store's tables
   (default `substrate`). If you override it, create the named schema with
   the owner role as owner and target it in the grants in section 2.
-- `ATE_API_POSTGRES_POOL_MAX_CONNS` — connections in the read/write pool
+- `--ateapi-postgres-pool-max-conns` — connections in the read/write pool
   (default: `max(4, NumCPU)`). It does not affect the owner and watch pools, which are
   capped at 2 and 3 connections.
 

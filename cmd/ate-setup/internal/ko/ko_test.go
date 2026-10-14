@@ -28,9 +28,7 @@ import (
 // install from source fails when the flag goes missing, because ko writes the
 // digests it just published straight into the manifest.
 func TestArgsAlwaysRequestBaseImportPaths(t *testing.T) {
-	// Keep the version stamp off git, so the flags are comparable.
-	t.Setenv("VERSION", "v0.0.0-test")
-	r := &Runner{Root: t.TempDir()}
+	r := &Runner{Root: t.TempDir(), BuildVersion: "v0.0.0-test"}
 
 	for _, tc := range []struct {
 		name string
@@ -62,10 +60,10 @@ func TestArgsKeepTheSubcommandAndTargetInFront(t *testing.T) {
 	}
 }
 
-func TestBuildVersionPrefersTheEnvironment(t *testing.T) {
+func TestBuildVersionIgnoresTheEnvironment(t *testing.T) {
 	t.Setenv("VERSION", "v1.2.3")
-	if got := BuildVersion(t.TempDir()); got != "v1.2.3" {
-		t.Errorf("BuildVersion() = %q, want v1.2.3", got)
+	if got := BuildVersion(t.TempDir(), os.Environ()); got != "dev" {
+		t.Errorf("BuildVersion() = %q, want dev without git metadata", got)
 	}
 }
 
@@ -73,7 +71,7 @@ func TestBuildVersionPrefersTheEnvironment(t *testing.T) {
 // there rather than stamping an empty version.
 func TestBuildVersionFallsBackToDev(t *testing.T) {
 	t.Setenv("VERSION", "")
-	if got := BuildVersion(t.TempDir()); got != "dev" {
+	if got := BuildVersion(t.TempDir(), os.Environ()); got != "dev" {
 		t.Errorf("BuildVersion() = %q, want dev", got)
 	}
 }
@@ -95,9 +93,8 @@ func fakeKo(t *testing.T, stdout string) (binary, argsFile string) {
 // A release is only installable if every image carries the tag and the
 // --base-import-paths name that --image-repo looks it up by.
 func TestBuildTagged(t *testing.T) {
-	t.Setenv("VERSION", "v1.2.3")
 	binary, argsFile := fakeKo(t, "repo/ateapi:v1.2.3@sha256:a\\nrepo/atelet:v1.2.3@sha256:b\\n")
-	r := &Runner{Root: t.TempDir(), Stderr: os.Stderr, binary: binary}
+	r := &Runner{Root: t.TempDir(), Stderr: os.Stderr, binary: binary, BuildVersion: "v1.2.3"}
 
 	refs, err := r.BuildTagged(t.Context(), "v1.2.3", "./cmd/ateapi", "./cmd/atelet")
 	if err != nil {

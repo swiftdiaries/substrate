@@ -25,7 +25,25 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
+	"github.com/spf13/pflag"
 )
+
+func resolveTestFlags(t *testing.T, path string, values map[string]string) *config.Resolved {
+	t.Helper()
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	config.BindFlags(fs)
+	config.BindCommandFlags(path, fs)
+	for flag, value := range values {
+		if err := fs.Set(flag, value); err != nil {
+			t.Fatalf("set --%s: %v", flag, err)
+		}
+	}
+	r, err := config.Resolve(fs, config.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	return r
+}
 
 // A record describes how the system was installed, so only the commands that
 // install it write it. Demos and benchmarks deploy on top of the system with
@@ -80,14 +98,11 @@ func TestNoRecordWithoutResolvedConfiguration(t *testing.T) {
 // do: resolve, write, and name a path the operator can hand back to --config.
 func TestRecordRunWritesAParseableFile(t *testing.T) {
 	dir := t.TempDir()
-	r, err := config.Resolve(nil, config.ResolveOptions{Env: map[string]string{
-		"ATE_RECORD_DIR":       dir,
-		"KUBECTL_CONTEXT":      "prod",
-		"ATE_ATENET_DATAPLANE": "agentgateway",
-	}})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
+	r := resolveTestFlags(t, "deploy atenet", map[string]string{
+		"record-dir":       dir,
+		"context":          "prod",
+		"atenet-dataplane": "agentgateway",
+	})
 	cfg := &config.Config{}
 	cfg.SetResolved(r)
 
@@ -124,13 +139,10 @@ func TestRecordRunWritesAParseableFile(t *testing.T) {
 // the record of a successful install.
 func TestRecordRunWritesAFailureArtifact(t *testing.T) {
 	dir := t.TempDir()
-	r, err := config.Resolve(nil, config.ResolveOptions{Env: map[string]string{
-		"ATE_RECORD_DIR":  dir,
-		"KUBECTL_CONTEXT": "prod",
-	}})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
+	r := resolveTestFlags(t, "deploy atenet", map[string]string{
+		"record-dir": dir,
+		"context":    "prod",
+	})
 	cfg := &config.Config{}
 	cfg.SetResolved(r)
 
@@ -156,8 +168,7 @@ func TestRecordRunWritesAFailureArtifact(t *testing.T) {
 // The record names the release the run installed, so a later reader can tell
 // what the cluster runs without asking the cluster.
 func TestRecordNamesTheInstalledVersion(t *testing.T) {
-	t.Setenv("VERSION", "v0.9.1")
-	raw, err := os.ReadFile(recordFor(t, t.TempDir(), nil))
+	raw, err := os.ReadFile(recordFor(t, t.TempDir(), map[string]string{"build-version": "v0.9.1"}))
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}

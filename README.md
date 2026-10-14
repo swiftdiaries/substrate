@@ -152,13 +152,14 @@ prints the installed version, off the atelet DaemonSet the install created.
 
 ### GKE Quickstart (Development)
 
-1. Create and configure your environment file:
+1. Set the project used by GCP provisioning and put ordinary installer
+   settings in a config file such as
+   [docs/examples/substrate-install.yaml](docs/examples/substrate-install.yaml):
    ```bash
-   cp hack/ate-dev-env.sh.example .ate-dev-env.sh
-
-   # Edit .ate-dev-env.sh to match your project and preferences, then source it:
-   source .ate-dev-env.sh
+   export PROJECT_ID=my-gcp-project
    ```
+   Pass installer settings with `--config`; `PROJECT_ID` remains a GCP
+   provisioning input.
 
 2. Enable application-default credentials for gcloud:
    ```bash
@@ -177,16 +178,27 @@ prints the installed version, off the atelet DaemonSet the install created.
    note the required Kubernetes beta APIs can only be enabled **at cluster
    creation** — see the [Create Cluster warning](tools/setup-gcp/README.md#2-create-cluster).
 
+   The checked-in install example is illustrative, not a drop-in for this
+   cluster: it names context `my-cluster` and pins prebuilt images at `v0.4.1`.
+   Copy it and edit `context` to the context shown by `kubectl config get-contexts`,
+   `storage.bucketName` to the bucket created by setup-gcp, and `images.tag` to
+   the release you want to install. For a source build, remove the `images`
+   block and set `ko.dockerRepo` to a registry you can push to.
+   ```bash
+   mkdir -p .scratch
+   cp docs/examples/substrate-install.yaml .scratch/gke-install.yaml
+   ```
+
 4. Deploy the Agent Substrate system to your cluster:
    ```bash
-   ./hack/install-ate.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}'
+   ./hack/install-ate.sh --config .scratch/gke-install.yaml --deploy-ate-system --credential-provider='{"name":"k8s.io"}'
    ```
 
    `--credential-provider` is required. `{"name":"k8s.io"}` also deploys the
    bundled Kubernetes Secrets provider, with a NetworkPolicy that admits only
    the egress gateway; `{"enabled":false}` turns egress credential injection off
    (see [docs/egress-credential-injection.md](docs/egress-credential-injection.md)).
-   `ATE_CREDENTIAL_PROVIDER` in `.ate-dev-env.sh` is the same choice.
+   The credential provider can also be set in the config file.
 
    **Credential injection needs a namespace policy.** The bundled provider
    starts with an empty, default-deny one, so it resolves no Secrets until you
@@ -200,7 +212,7 @@ prints the installed version, off the atelet DaemonSet the install created.
 
 5. You can then deploy the sample applications. See [demos/counter/README.md](demos/counter/README.md) or [demos/sandbox/README.md](demos/sandbox/README.md) for detailed walkthroughs.
    ```bash
-   ./hack/install-ate.sh --deploy-demo-counter
+   ./hack/install-ate.sh --config .scratch/gke-install.yaml --deploy-demo-counter
    ```
 
 #### Custom Setup and Deployment

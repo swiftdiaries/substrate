@@ -49,7 +49,7 @@ func TestPublishReleaseImagesNeedsARegistry(t *testing.T) {
 	e := &Env{Cfg: &config.Config{Root: t.TempDir()}}
 
 	err := e.PublishReleaseImages(t.Context(), io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "KO_DOCKER_REPO") {
-		t.Errorf("PublishReleaseImages() error = %v, want one naming KO_DOCKER_REPO", err)
+	if err == nil || !strings.Contains(err.Error(), "--ko-docker-repo") {
+		t.Errorf("PublishReleaseImages() error = %v, want one naming --ko-docker-repo", err)
 	}
 }

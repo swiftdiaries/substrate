@@ -21,9 +21,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
-
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
 )
 
 // runRoot executes the command tree with args, quietly.
@@ -133,11 +132,8 @@ func TestCSICommandsStillRejectStrayArguments(t *testing.T) {
 	}
 }
 
-// A driver supplied by the environment or a configuration file cannot be
-// checked in Args, which runs before the configuration is loaded. It is
-// checked in RunE instead, so the value still has to be rejected -- just after
-// the credential fetch rather than before it.
-func TestCSIDriverFromTheEnvironmentIsStillRejected(t *testing.T) {
+// Resolved CSI validation names the source that supplied an invalid value.
+func TestCSIDriverFlagIsStillRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		driver  string
@@ -147,27 +143,19 @@ func TestCSIDriverFromTheEnvironmentIsStillRejected(t *testing.T) {
 		{name: "rejected", driver: "hostpaht", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := config.Resolve(nil, config.ResolveOptions{
-				Env: map[string]string{"SETUP_CSI": tc.driver},
-			})
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
+			r := resolveTestFlags(t, "deploy ate-system", map[string]string{"setup-csi": tc.driver})
 			cfg := &config.Config{}
 			cfg.SetResolved(r)
-
 			prev := env
 			env = &steps.Env{Cfg: cfg}
 			t.Cleanup(func() { env = prev })
 
-			_, err = deployOptions()
+			_, err := deployOptions()
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("deployOptions() = nil error for driver %q, want one", tc.driver)
 				}
-				// The value came from the environment, so the message has to
-				// name the variable rather than --setup-csi.
-				for _, want := range []string{"csi.setup", tc.driver, "SETUP_CSI"} {
+				for _, want := range []string{"csi.setup", tc.driver, "--setup-csi"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("deployOptions() = %q, missing %q", err, want)
 					}

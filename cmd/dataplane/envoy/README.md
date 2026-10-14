@@ -23,7 +23,7 @@ During a build from source, `ate-setup` builds the image from this directory via
 A pre-built install (`ate-setup deploy --image-repo REPO --image-tag TAG`) builds nothing and pins `REPO/envoy-dataplane:TAG` instead, so a release publishes it with the other images:
 
 ```bash
-VERSION=TAG go run ./cmd/ate-setup publish release-images --ko-docker-repo REPO
+go run ./cmd/ate-setup publish release-images --build-version TAG --ko-docker-repo REPO
 ```
 
 The image targets the same platforms as the ko images: `KO_DEFAULTPLATFORMS`, else `defaultPlatforms` in `.ko.yaml` (linux/amd64 and linux/arm64), else `linux/amd64`. Building another architecture compiles Rust under QEMU, which must be registered with binfmt (e.g. `docker run --privileged --rm tonistiigi/binfmt --install arm64`).

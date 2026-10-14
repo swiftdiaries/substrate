@@ -45,22 +45,18 @@ type Options struct {
 	// Image source selection.
 	ImageRepo string
 	ImageTag  string
-
-	// NoDevEnv skips sourcing .ate-dev-env.sh even when it exists.
-	NoDevEnv bool
 }
 
 // Load resolves the effective configuration from the legacy Options struct.
 //
 // It delegates to LoadFlags so there is one resolution path: Options is
-// projected onto a flag set, then layered with the environment and any
-// configuration file exactly as the command line is.
+// projected onto a flag set, then layered with any configuration file.
 func Load(opts Options) (*Config, error) {
 	fs, err := optionsFlagSet(opts)
 	if err != nil {
 		return nil, err
 	}
-	return LoadFlags(fs, LoadOptions{NoDevEnv: opts.NoDevEnv})
+	return LoadFlags(fs, LoadOptions{})
 }
 
 // optionsFlagSet converts the legacy Options struct into a bound flag set,

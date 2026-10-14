@@ -28,29 +28,36 @@ import (
 	"github.com/agent-substrate/substrate/internal/oidcdiscovery"
 )
 
-// ConfigPathEnv names the configuration document when --config is not given.
-//
-// It exists so the file channel crosses hack/install-ate.sh, which forwards
-// only a fixed set of flags but passes the whole environment to the child
-// process. Every other setting reaches ate-setup that way already.
-const ConfigPathEnv = "ATE_CONFIG"
-
 // LoadOptions carries the inputs that select where configuration comes from,
 // as opposed to the settings themselves.
 type LoadOptions struct {
-	// ConfigPath is the --config document. Empty falls back to $ATE_CONFIG,
-	// and then to no file layer.
+	// ConfigPath is the --config document. Empty means no file layer.
 	ConfigPath string
-	// NoDevEnv skips sourcing .ate-dev-env.sh even when it exists.
-	NoDevEnv bool
+}
+
+// RepoRoot walks up from the working directory to the module root. It works
+// in a source tarball without a .git directory.
+func RepoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("while resolving the working directory: %w", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no go.mod found above %s: run ate-setup from inside the repository", dir)
+		}
+		dir = parent
+	}
 }
 
 // LoadFlags resolves the effective configuration from a bound flag set.
 //
-// Precedence, lowest to highest: .ate-dev-env.sh, the process environment, the
-// configuration file, then flags. The file outranks the environment because it
-// is the artifact an operator owns and reviews; ambient state must not silently
-// outrank it.
+// Ordinary setting precedence, lowest to highest: default, configuration file,
+// then flags. Secret environment values sit below the file.
 func LoadFlags(fs *pflag.FlagSet, o LoadOptions) (*Config, error) {
 	root, err := RepoRoot()
 	if err != nil {
@@ -63,15 +70,10 @@ func LoadFlags(fs *pflag.FlagSet, o LoadOptions) (*Config, error) {
 	// is one of the channels that answers it. Parsing reads only the file, so
 	// nothing here depends on the environment it precedes.
 	var file *File
-	if path := configPathFrom(o); path != "" {
+	if path := o.ConfigPath; path != "" {
 		if file, err = ParseFile(path); err != nil {
 			return nil, err
 		}
-	}
-
-	kind := resolveKind(fs, file, env)
-	if err := mergeDevEnv(root, env, o.NoDevEnv, kind); err != nil {
-		return nil, err
 	}
 
 	res, err := Resolve(fs, ResolveOptions{File: file, Env: env})
@@ -79,91 +81,6 @@ func LoadFlags(fs *pflag.FlagSet, o LoadOptions) (*Config, error) {
 		return nil, err
 	}
 	return buildConfig(root, env, res)
-}
-
-// configPathFrom picks the configuration document, flag over environment.
-//
-// A relative path resolves against the working directory, which is the
-// repository root when the shell installer invoked this: it does cd "$ROOT"
-// before running the binary. ParseFile reports the absolute path it tried, so
-// a path that meant something else from the caller's directory is visible in
-// the error rather than silently missing.
-func configPathFrom(o LoadOptions) string {
-	if o.ConfigPath != "" {
-		return o.ConfigPath
-	}
-	return os.Getenv(ConfigPathEnv)
-}
-
-// resolveKind answers the Kind question before the dev environment is sourced,
-// because whether to source it depends on the answer.
-//
-// It layers the same channels in the same order Resolve does, off the same
-// registry entry. Answering it from the flag and the environment alone would
-// make a document that selects Kind still source .ate-dev-env.sh, pointing a
-// local install at the GKE project the file names.
-func resolveKind(fs *pflag.FlagSet, file *File, env map[string]string) bool {
-	s, ok := Lookup(kindEnabledKey)
-	if !ok {
-		return false
-	}
-	asBool := func(raw string) (bool, bool) {
-		v, err := s.parse(raw)
-		if err != nil {
-			// Reported by Resolve, which sees the same value moments later.
-			return false, false
-		}
-		b, _ := v.(bool)
-		return b, true
-	}
-
-	if fs != nil && fs.Changed(s.Flag) {
-		// Read even when false: --kind=false is a deliberate override of an
-		// inherited variable, not an absence.
-		if b, err := fs.GetBool(s.Flag); err == nil {
-			return b
-		}
-	}
-	if file != nil {
-		if raw, present := file.Get(s.Key); present {
-			if b, valid := asBool(raw); valid {
-				return b
-			}
-		}
-	}
-	if raw, present := env[s.Env]; present {
-		if b, valid := asBool(raw); valid {
-			return b
-		}
-	}
-	return false
-}
-
-// mergeDevEnv layers .ate-dev-env.sh underneath the process environment.
-//
-// Sourcing is skipped for Kind installs the same way the shell kind installer
-// exports NO_DEV_ENV: the GKE-shaped variables in a developer's file would
-// otherwise point a local install at a cloud project.
-func mergeDevEnv(root string, env map[string]string, noDevEnv, kind bool) error {
-	if noDevEnv || kind || os.Getenv("NO_DEV_ENV") != "" {
-		return nil
-	}
-	path := filepath.Join(root, devEnvFile)
-	if _, err := os.Stat(path); err != nil {
-		return nil
-	}
-	sourced, err := sourceShellEnv(path, root)
-	if err != nil {
-		return fmt.Errorf("while sourcing %s: %w", devEnvFile, err)
-	}
-	// The process environment still wins: an explicitly exported variable is a
-	// deliberate override of the file.
-	for k, v := range sourced {
-		if _, ok := env[k]; !ok {
-			env[k] = v
-		}
-	}
-	return nil
 }
 
 // buildConfig projects the resolved settings onto Config.
@@ -188,7 +105,7 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 		return nil, &InvalidError{Value: v, Want: "a positive integer"}
 	}
 
-	kubeconfig, kubeconfigEnv := splitKubeconfig(r)
+	kubeconfig, kubeconfigEnv := splitKubeconfig(r, env)
 
 	// One configured connection serves both pools; both empty selects the
 	// bundled PostgreSQL.
@@ -216,6 +133,7 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 		BucketName:         r.String("storage.bucketName"),
 		KODockerRepo:       r.String("ko.dockerRepo"),
 		KODefaultPlatforms: r.String("ko.defaultPlatforms"),
+		BuildVersion:       r.String("build.version"),
 		ActorJWTAlgorithm:  r.String("actorJWT.algorithm"),
 		ActorJWTIssuer:     actorJWTIssuer,
 		DockerBuildFlags:   strings.Fields(r.String("docker.buildFlags")),
@@ -234,14 +152,12 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 		PostgresReadWriteRole:             r.String("ateapi.postgres.readWrite.role"),
 		PostgresOwnerRole:                 r.String("ateapi.postgres.owner.role"),
 		// Whether a role was chosen rather than defaulted. Taken from the
-		// resolver, which knows about all three channels, rather than from an
-		// environment lookup that only sees one.
+		// resolver, which knows whether the file or flag supplied the value.
 		PostgresReadWriteRoleSet: r.Supplied("ateapi.postgres.readWrite.role"),
 		PostgresOwnerRoleSet:     r.Supplied("ateapi.postgres.owner.role"),
 		CloudSQL: CloudSQLConfig{
 			Instance: instance.Raw,
-			// Any channel may now express "explicitly empty", not just the
-			// environment, so a file can clear Cloud SQL.
+			// A file or flag can explicitly clear Cloud SQL.
 			InstanceSet: instance.Supplied,
 			GSA:         r.String("ateapi.postgres.cloudsql.gsa"),
 			IAMAuth:     r.String("ateapi.postgres.cloudsql.iamAuth"),
@@ -272,18 +188,19 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 // value exported to the shell scripts.
 //
 // $KUBECONFIG is a PATH-style list, and developers who juggle clusters do set it
-// to several files. client-go's explicit path is a single file, so passing such
-// a value through makes every command fail. A list is left to the default
-// loading rules, which already read $KUBECONFIG and merge its entries.
-func splitKubeconfig(r *Resolved) (explicitPath, scriptValue string) {
+// to several files. Ambient lists stay with client-go's default loading rules;
+// explicit lists are passed through and interpreted as a precedence list by
+// ateclient.LoadKubeConfig.
+func splitKubeconfig(r *Resolved, env map[string]string) (explicitPath, scriptValue string) {
 	v, _ := r.Value("kubeconfig")
 	if v.From == OriginFlag || v.From == OriginFile {
 		return v.Raw, v.Raw
 	}
-	if strings.ContainsRune(v.Raw, os.PathListSeparator) {
-		return "", v.Raw
+	ambient := env["KUBECONFIG"]
+	if strings.ContainsRune(ambient, os.PathListSeparator) {
+		return "", ambient
 	}
-	return v.Raw, v.Raw
+	return ambient, ambient
 }
 
 // applyKindDefaults fills the Kind-only settings, leaving alone any a channel
@@ -297,7 +214,7 @@ func splitKubeconfig(r *Resolved) (explicitPath, scriptValue string) {
 // on the next machine and the next release, not to the install it recorded.
 func applyKindDefaults(r *Resolved) {
 	// A Kind cluster has no GCP project, so the coordinates are cleared even
-	// when the developer environment named them. Only when something did name
+	// when a file or flag named them. Only when something did name
 	// them: clearing an already-empty setting would report a value as set by
 	// the profile when the profile changed nothing.
 	for _, key := range []string{"gcp.projectID", "gcp.clusterLocation"} {
@@ -312,10 +229,8 @@ func applyKindDefaults(r *Resolved) {
 	if r.String("ko.dockerRepo") == "" {
 		r.set("ko.dockerRepo", "localhost:5001", OriginKindProfile)
 	}
-	// Ambient environment is ignored: a developer's shell or .ate-dev-env.sh
-	// points these at GKE and GCS, which a local install must not inherit. A
-	// value the caller named on this run in a flag or a configuration file is
-	// theirs and is kept.
+	// Ambient environment is ignored: a caller must choose GKE and GCS targets
+	// through a flag or configuration file.
 	if !namedExplicitly(r, "ko.defaultPlatforms") {
 		r.set("ko.defaultPlatforms", "linux/"+runtime.GOARCH, OriginKindProfile)
 	}
@@ -325,7 +240,7 @@ func applyKindDefaults(r *Resolved) {
 }
 
 // namedExplicitly reports whether a flag or configuration file supplied the
-// setting, as opposed to it arriving from the ambient environment or a default.
+// setting, as opposed to it holding its default value.
 func namedExplicitly(r *Resolved, key string) bool {
 	v, ok := r.Value(key)
 	return ok && (v.From == OriginFlag || v.From == OriginFile)
@@ -346,6 +261,10 @@ func validateResolved(cfg *Config, r *Resolved) error {
 	case !cfg.Images.IsPrebuilt() && cfg.Images.Tag != "":
 		return &ConflictError{A: tag, B: repo,
 			Why: "without a repository, images are built from source and the tag names nothing"}
+	}
+	if cfg.Images.IsPrebuilt() && r.Supplied("build.version") {
+		v, _ := r.Value("build.version")
+		return &InvalidError{Value: v, Want: "unset when installing prebuilt images; the image tag supplies their version"}
 	}
 
 	dataplane, _ := r.Value("atenet.dataplane")

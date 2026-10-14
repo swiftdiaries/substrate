@@ -61,9 +61,9 @@ func TestResolvePrecedence(t *testing.T) {
 			wantRaw: "alpha", wantFrom: OriginDefault,
 		},
 		{
-			name:    "environment alone",
+			name:    "ordinary environment is ignored",
 			env:     map[string]string{env: "beta"},
-			wantRaw: "beta", wantFrom: OriginEnv,
+			wantRaw: "alpha", wantFrom: OriginDefault,
 		},
 		{
 			name:    "file alone",
@@ -118,6 +118,50 @@ func TestResolvePrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveSettingsAndSecretEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		flags    map[string]string
+		file     map[string]string
+		env      map[string]string
+		key      string
+		wantRaw  string
+		wantFrom Origin
+	}{
+		{name: "ordinary environment is ignored", env: map[string]string{"SCRATCH_VALUE": "ambient"}, key: "scratch.value", wantRaw: "default", wantFrom: OriginDefault},
+		{name: "file beats default", file: map[string]string{"scratch.value": "file"}, key: "scratch.value", wantRaw: "file", wantFrom: OriginFile},
+		{name: "flag beats file", file: map[string]string{"scratch.value": "file"}, flags: map[string]string{"scratch-value": "flag"}, key: "scratch.value", wantRaw: "flag", wantFrom: OriginFlag},
+		{name: "explicit false remains supplied", flags: map[string]string{"scratch-enabled": "false"}, key: "scratch.enabled", wantRaw: "false", wantFrom: OriginFlag},
+		{name: "explicit empty remains supplied", file: map[string]string{"scratch.empty": ""}, key: "scratch.empty", wantRaw: "", wantFrom: OriginFile},
+		{name: "secret environment is retained", env: map[string]string{"SCRATCH_SECRET": "env-secret"}, key: "scratch.secret", wantRaw: "env-secret", wantFrom: OriginEnv},
+		{name: "file beats secret environment", env: map[string]string{"SCRATCH_SECRET": "env-secret"}, file: map[string]string{"scratch.secret": "file-secret"}, key: "scratch.secret", wantRaw: "file-secret", wantFrom: OriginFile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useSettings(t,
+				Setting{Key: "scratch.value", Env: "SCRATCH_VALUE", Flag: "scratch-value", Kind: KindString, Default: "default", Usage: "ordinary"},
+				Setting{Key: "scratch.enabled", Env: "SCRATCH_ENABLED", Flag: "scratch-enabled", Kind: KindBool, Default: "true", Usage: "boolean"},
+				Setting{Key: "scratch.empty", Env: "SCRATCH_EMPTY", Flag: "scratch-empty", Kind: KindString, Default: "fallback", Usage: "string"},
+				Setting{Key: "scratch.secret", Env: "SCRATCH_SECRET", Kind: KindString, Secret: true, Usage: "secret"},
+			)
+			var f *File
+			if tc.file != nil {
+				f = fileWith(tc.file)
+			}
+			r, err := Resolve(flagsWith(t, tc.flags), ResolveOptions{File: f, Env: tc.env})
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+			v, ok := r.Value(tc.key)
+			if !ok {
+				t.Fatalf("Value(%q) missing", tc.key)
+			}
+			if v.Raw != tc.wantRaw || v.From != tc.wantFrom || !v.Supplied && tc.wantFrom != OriginDefault {
+				t.Errorf("Value(%q) = %#v, want raw %q from %v", tc.key, v, tc.wantRaw, tc.wantFrom)
+			}
+		})
+	}
+}
+
 // An empty value a channel supplied is not the same as one nobody set. The
 // Cloud SQL instance setting depends on the distinction.
 func TestResolveSuppliedDistinguishesEmptyFromAbsent(t *testing.T) {
@@ -126,15 +170,15 @@ func TestResolveSuppliedDistinguishesEmptyFromAbsent(t *testing.T) {
 
 	for _, tc := range []struct {
 		name         string
-		env          map[string]string
+		flags        map[string]string
 		wantSupplied bool
 	}{
-		{name: "absent", env: map[string]string{}, wantSupplied: false},
-		{name: "present but empty", env: map[string]string{env: ""}, wantSupplied: true},
-		{name: "present with a value", env: map[string]string{env: "p:r:i"}, wantSupplied: true},
+		{name: "absent", wantSupplied: false},
+		{name: "present but empty", flags: map[string]string{"fixture-name": ""}, wantSupplied: true},
+		{name: "present with a value", flags: map[string]string{"fixture-name": "p:r:i"}, wantSupplied: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := Resolve(flagsWith(t, nil), ResolveOptions{Env: tc.env})
+			r, err := Resolve(flagsWith(t, tc.flags), ResolveOptions{})
 			if err != nil {
 				t.Fatalf("Resolve() error = %v", err)
 			}
@@ -225,7 +269,6 @@ func TestResolveHonorsAnExplicitlyEmptyString(t *testing.T) {
 			opts  ResolveOptions
 			flags map[string]string
 		}{
-			{name: "environment", opts: ResolveOptions{Env: map[string]string{env: ""}}},
 			{name: "file", opts: ResolveOptions{File: fileWith(map[string]string{key: ""})}},
 			{name: "flag", flags: map[string]string{flag: ""}},
 		} {
@@ -246,45 +289,24 @@ func TestResolveHonorsAnExplicitlyEmptyString(t *testing.T) {
 	}
 }
 
-// Adding a default to a setting that did not have one must not change what an
-// already-written FOO= or key: "" means. Inferring "may be empty" from
-// Default == "" makes that a silent behavior change for every operator whose
-// environment or record carries the empty value.
+// An explicitly empty flag remains supplied even when a setting has a default.
 func TestAddingADefaultDoesNotChangeWhatEmptyMeans(t *testing.T) {
-	const key, env = "scratch.str", "SCRATCH_STR"
-	resolveWith := func(t *testing.T, def string) (string, bool) {
-		t.Helper()
-		useSettings(t, Setting{
-			Key: key, Env: env, Flag: "scratch-str", Kind: KindString,
-			Default: def, Usage: "a string",
-		})
-		r, err := Resolve(nil, ResolveOptions{Env: map[string]string{env: ""}})
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		return r.String(key), r.Supplied(key)
+	const key, flag = "scratch.str", "scratch-str"
+	useSettings(t, Setting{Key: key, Flag: flag, Kind: KindString, Default: "alpha", Usage: "a string"})
+	r, err := Resolve(flagsWith(t, map[string]string{flag: ""}), ResolveOptions{})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
 	}
-
-	beforeValue, beforeSupplied := resolveWith(t, "")
-	afterValue, afterSupplied := resolveWith(t, "alpha")
-
-	if beforeSupplied != afterSupplied {
-		t.Errorf("Supplied() = %v without a default and %v with one; adding a default changed what %s= means",
-			beforeSupplied, afterSupplied, env)
-	}
-	if beforeValue != afterValue {
-		t.Errorf("String() = %q without a default and %q with one", beforeValue, afterValue)
+	if got := r.String(key); got != "" || !r.Supplied(key) {
+		t.Errorf("explicit empty flag = %q, supplied %v; want empty and supplied", got, r.Supplied(key))
 	}
 }
 
 func TestResolveTypedAccessors(t *testing.T) {
 	useFixtures(t)
-	r, err := Resolve(flagsWith(t, nil), ResolveOptions{Env: map[string]string{
-		"FIXTURE_ENABLED": "true",
-		"FIXTURE_COUNT":   "6",
-		"FIXTURE_TIMEOUT": "90s",
-		"FIXTURE_NAME":    "custom",
-	}})
+	r, err := Resolve(flagsWith(t, map[string]string{
+		"fixture-enabled": "true", "fixture-count": "6", "fixture-timeout": "90s", "fixture-name": "custom",
+	}), ResolveOptions{})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -328,13 +350,11 @@ func TestResolveDefaults(t *testing.T) {
 // from so the reader knows where to look.
 func TestResolveRejectsMalformedValue(t *testing.T) {
 	useFixtures(t)
-	_, err := Resolve(flagsWith(t, nil), ResolveOptions{Env: map[string]string{
-		"FIXTURE_TIMEOUT": "ninety",
-	}})
+	_, err := Resolve(flagsWith(t, map[string]string{"fixture-timeout": "ninety"}), ResolveOptions{})
 	if err == nil {
 		t.Fatal("Resolve() = nil error, want an error for a malformed duration")
 	}
-	var want = []string{"fixture.timeout", "FIXTURE_TIMEOUT", "ninety"}
+	var want = []string{"fixture.timeout", "--fixture-timeout", "ninety"}
 	for _, w := range want {
 		if !strings.Contains(err.Error(), w) {
 			t.Errorf("error %q does not mention %q", err, w)
@@ -346,7 +366,7 @@ func TestResolveOriginsListsOnlySuppliedSettings(t *testing.T) {
 	useFixtures(t)
 	r, err := Resolve(
 		flagsWith(t, map[string]string{"fixture-mode": "beta"}),
-		ResolveOptions{Env: map[string]string{"FIXTURE_NAME": "n"}},
+		ResolveOptions{},
 	)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -355,11 +375,8 @@ func TestResolveOriginsListsOnlySuppliedSettings(t *testing.T) {
 	for _, v := range r.Origins() {
 		got[v.Setting.Key] = v.From
 	}
-	if len(got) != 2 {
-		t.Fatalf("Origins() = %v, want exactly the two supplied settings", got)
-	}
-	if got["fixture.name"] != OriginEnv {
-		t.Errorf("fixture.name from %v, want env", got["fixture.name"])
+	if len(got) != 1 {
+		t.Fatalf("Origins() = %v, want exactly the one supplied setting", got)
 	}
 	if got["fixture.mode"] != OriginFlag {
 		t.Errorf("fixture.mode from %v, want flag", got["fixture.mode"])
@@ -368,14 +385,14 @@ func TestResolveOriginsListsOnlySuppliedSettings(t *testing.T) {
 
 func TestOriginDescribeNamesTheEditableThing(t *testing.T) {
 	useFixtures(t)
-	s := setting(t, "fixture.mode")
+	s := setting(t, "fixture.secret")
 	for _, tc := range []struct {
 		origin Origin
 		want   string
 	}{
-		{OriginEnv, "FIXTURE_MODE"},
-		{OriginFile, "config.fixture.mode"},
-		{OriginFlag, "--fixture-mode"},
+		{OriginEnv, "FIXTURE_SECRET"},
+		{OriginFile, "config.fixture.secret"},
+		{OriginFlag, "--fixture-secret"},
 		{OriginDefault, "default"},
 	} {
 		if got := tc.origin.Describe(s); got != tc.want {

@@ -23,9 +23,13 @@ import (
 
 func testSetting(key, env, flag string, commands ...string) Setting {
 	return Setting{
-		Key: key, Env: env, Flag: flag, Kind: KindString,
+		Key: key, Flag: flag, Kind: KindString,
 		Commands: commands, Usage: "test setting",
 	}
+}
+
+func secretTestSetting(key, env string) Setting {
+	return Setting{Key: key, Env: env, Kind: KindString, Secret: true, Usage: "test secret"}
 }
 
 func TestRegisterCommandExtendsAll(t *testing.T) {
@@ -57,24 +61,19 @@ func TestScopedSettingsAreVisibleToTheFileChannel(t *testing.T) {
 	}
 }
 
-// Only the flag channel is scoped. Environment and file must reach a scoped
-// setting; the flag reaches it only on its own command.
-func TestScopedSettingResolvesFromEveryChannel(t *testing.T) {
+// Only the flag channel is scoped. The file reaches a scoped setting from any
+// command, while the flag reaches it only on its own command.
+func TestScopedSettingResolvesFromFileAndFlag(t *testing.T) {
 	useSettings(t, testSetting("test.scoped", "ATE_TEST_SCOPED", "test-scoped", "deploy thing"))
 
 	for _, tc := range []struct {
 		name     string
-		env      map[string]string
 		file     string
 		flag     string
 		want     string
 		wantFrom Origin
 	}{
 		{name: "default", want: "", wantFrom: OriginDefault},
-		{
-			name: "environment", env: map[string]string{"ATE_TEST_SCOPED": "fromenv"},
-			want: "fromenv", wantFrom: OriginEnv,
-		},
 		{
 			name: "file", file: "value: fromfile", want: "fromfile", wantFrom: OriginFile,
 		},
@@ -95,7 +94,7 @@ func TestScopedSettingResolvesFromEveryChannel(t *testing.T) {
 				}
 			}
 
-			r, err := Resolve(fs, ResolveOptions{Env: tc.env, File: file})
+			r, err := Resolve(fs, ResolveOptions{File: file})
 			if err != nil {
 				t.Fatalf("Resolve() error = %v", err)
 			}
@@ -179,8 +178,8 @@ func TestValidate(t *testing.T) {
 		{
 			name: "duplicate environment variable",
 			add: []Setting{
-				testSetting("test.a", "ATE_TEST_SAME", "test-a", "deploy thing"),
-				testSetting("test.b", "ATE_TEST_SAME", "test-b", "deploy thing"),
+				secretTestSetting("test.a", "ATE_TEST_SAME"),
+				secretTestSetting("test.b", "ATE_TEST_SAME"),
 			},
 			wantErr: true, wantIn: `environment variable "ATE_TEST_SAME"`,
 		},
@@ -195,12 +194,12 @@ func TestValidate(t *testing.T) {
 
 		{
 			name:    "collides with a setting the installer owns",
-			add:     []Setting{testSetting("test.a", "ATE_NAMESPACE", "test-a", "deploy thing")},
+			add:     []Setting{testSetting("namespace", "", "test-a", "deploy thing")},
 			wantErr: true, wantIn: "namespace",
 		},
 		{
-			name:    "missing environment variable",
-			add:     []Setting{{Key: "test.a", Flag: "test-a", Kind: KindString, Usage: "u"}},
+			name:    "secret missing environment variable",
+			add:     []Setting{{Key: "test.a", Kind: KindString, Secret: true, Usage: "u"}},
 			wantErr: true, wantIn: "no environment variable",
 		},
 	} {

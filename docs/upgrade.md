@@ -145,19 +145,20 @@ retire at the end deletes each old pool. Where the runbook says
 ### Checkout and environment
 
 Every `go run ./cmd/ate-setup` command below runs from a checkout of
-the new release, with the environment and flags the install used:
-`PROJECT_ID`, `CLUSTER_NAME` and `CLUSTER_LOCATION` (or `--context`),
-and either `KO_DOCKER_REPO` for a build from source or
-`--image-repo`/`--image-tag` for prebuilt images. Keep a checkout of
+the new release, with the configuration file or flags the install used:
+`--gcp-project-id`, `--gcp-cluster-name` and `--gcp-cluster-location` (or `--context`),
+and either `--ko-docker-repo` for a build from source or
+`--image-repo`/`--image-tag` for prebuilt images. Supply credential DSNs again
+if they were omitted from the install record. Keep a checkout of
 the old release too as rollback runs the same commands from it.
 
-`ate-setup` takes the version from `$VERSION` when it is set, else
-from `git describe` on the checkout for a build from source, or from
-`--image-tag` (`ATE_IMAGE_TAG`) for prebuilt images. That value must come out different
+`ate-setup` uses `--build-version` when supplied, otherwise `git describe` on
+the checkout for a source build. Prebuilt identity comes from `--image-tag`;
+`--build-version` is rejected for prebuilt images. That value must come out different
 from `$OLD_VERSION`, otherwise dataplane upgrade rolls the running atelet in place
 instead of adding a second DaemonSet. A tagged checkout differs by
-construction; if the install pinned `VERSION`, pin a new value now
-and keep it for every command of this upgrade.
+construction; if the install pinned a source build version, set a new `--build-version` and
+keep it for every command of this upgrade.
 
 Install the new `kubectl ate` with `go install ./cmd/kubectl-ate`.
 
@@ -525,7 +526,8 @@ go run ./cmd/ate-setup deploy ate-system --credential-provider='<as installed>'
 ```
 
 `deploy ate-system` requires the credential provider selection; pass the one
-the install was made with, or carry it in `ATE_CREDENTIAL_PROVIDER`. An install
+the install was made with, or set it in the config file or with
+`--credential-provider`. An install
 made with `--experimental-egress-credential-injection` and the bundled provider
 is `{"name":"k8s.io"}`; one without injection is `{"enabled":false}`. The
 selection replaces `--credential-provider-name` and
@@ -585,8 +587,8 @@ first, then the nodes, then ate-controller last. The roll never edits
 or deletes the old objects, so the old `WorkerPool` is intact, the pods
 that lost their nodes stay Pending, and the old atelet DaemonSet is
 still installed. Rolling nodes back is a matter of label flips. Run the
-commands from the old release's checkout with the same environment as
-the install, `VERSION` included if the install pinned it.
+commands from the old release's checkout with the same configuration and flags as
+the install, `--build-version` included if the source install pinned it.
 
 - Relabeled the GKE node pool: park the autoscaler again as
   [before the roll](#on-gke), then move the node pool label back to
@@ -606,7 +608,7 @@ the install, `VERSION` included if the install pinned it.
 
 `kubectl get ds -n ate-system -l app=atelet` must not show a third
 DaemonSet afterwards. A third means the old checkout produced a
-version other than `$OLD_VERSION`: delete it and check `VERSION`.
+version other than `$OLD_VERSION`: delete it and check `--build-version`.
 
 Abandoning the upgrade entirely is the whole list, top to bottom.
 Retiring the old pool (below) is a separate, deliberate step. As long

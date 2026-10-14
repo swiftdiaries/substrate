@@ -68,10 +68,36 @@ func TestKindKeepsExplicitValuesButNotAmbientOnes(t *testing.T) {
 	})
 }
 
-// The file layer outranks the environment, which the dotfile does not.
-func TestLoadFlagsFileOutranksEnvironment(t *testing.T) {
+func TestLoadFlagsIgnoresLegacyEnvironmentAndDevEnvFile(t *testing.T) {
 	loadEnv(t)
-	t.Setenv("ATE_ATENET_DATAPLANE", RouterAgentgateway)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/install\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".ate-dev-env.sh"), []byte("exit 42\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	t.Setenv("ATE_CONFIG", filepath.Join(root, "missing.yaml"))
+	t.Setenv("ATE_NAMESPACE", "hostile-ambient-value")
+	t.Setenv("ATE_NO_REPORT_DEFAULTS", "1")
+
+	fs, err := optionsFlagSet(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFlags(fs, LoadOptions{})
+	if err != nil {
+		t.Fatalf("LoadFlags() treated a legacy input as configuration: %v", err)
+	}
+	if cfg.Namespace != "ate-system" {
+		t.Errorf("Namespace = %q, want default ate-system despite hostile environment", cfg.Namespace)
+	}
+}
+
+// The file layer outranks the environment, which the dotfile does not.
+func TestLoadFlagsReadsConfigurationFile(t *testing.T) {
+	loadEnv(t)
 
 	path := filepath.Join(t.TempDir(), "install.yaml")
 	body := "apiVersion: " + FileAPIVersion + "\nkind: " + FileKind + "\n" +
@@ -95,18 +121,23 @@ func TestLoadFlagsFileOutranksEnvironment(t *testing.T) {
 // A validation failure names the channel the offending value came from.
 func TestLoadFlagsErrorsNameTheSupplyingChannel(t *testing.T) {
 	loadEnv(t)
-	t.Setenv("ATE_ATENET_DATAPLANE", "nginx")
+	path := filepath.Join(t.TempDir(), "invalid.yaml")
+	body := "apiVersion: " + FileAPIVersion + "\nkind: " + FileKind + "\n" +
+		"atenet:\n  dataplane: nginx\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	fs, err := optionsFlagSet(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = LoadFlags(fs, LoadOptions{})
+	_, err = LoadFlags(fs, LoadOptions{ConfigPath: path})
 	if err == nil {
 		t.Fatal("LoadFlags() = nil error, want an invalid-dataplane error")
 	}
-	if !strings.Contains(err.Error(), "ATE_ATENET_DATAPLANE") {
-		t.Errorf("error %q does not name the environment variable that supplied it", err)
+	if !strings.Contains(err.Error(), "config.atenet.dataplane") {
+		t.Errorf("error %q does not name the configuration key that supplied it", err)
 	}
 }
 
@@ -121,80 +152,16 @@ func TestLoadFlagsRejectsBadConfigPath(t *testing.T) {
 	}
 }
 
-// The file channel must cross hack/install-ate.sh, which forwards only a fixed
-// set of flags but passes the whole environment through. ATE_CONFIG is how it
-// gets there without a shim change.
-func TestConfigPathFromEnvironment(t *testing.T) {
-	loadEnv(t)
-	path := filepath.Join(t.TempDir(), "install.yaml")
-	body := "apiVersion: " + FileAPIVersion + "\nkind: " + FileKind + "\n" +
-		"atenet:\n  dataplane: " + RouterAgentgateway + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("environment supplies the document", func(t *testing.T) {
-		t.Setenv(ConfigPathEnv, path)
-		fs, err := optionsFlagSet(Options{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := LoadFlags(fs, LoadOptions{})
-		if err != nil {
-			t.Fatalf("LoadFlags() error = %v", err)
-		}
-		if cfg.Router != RouterAgentgateway {
-			t.Errorf("Router = %q, want %q from $%s", cfg.Router, RouterAgentgateway, ConfigPathEnv)
-		}
-	})
-
-	t.Run("the flag outranks the environment", func(t *testing.T) {
-		other := filepath.Join(t.TempDir(), "other.yaml")
-		otherBody := "apiVersion: " + FileAPIVersion + "\nkind: " + FileKind + "\n" +
-			"atenet:\n  dataplane: " + RouterEnvoy + "\n"
-		if err := os.WriteFile(other, []byte(otherBody), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv(ConfigPathEnv, path)
-		fs, err := optionsFlagSet(Options{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := LoadFlags(fs, LoadOptions{ConfigPath: other})
-		if err != nil {
-			t.Fatalf("LoadFlags() error = %v", err)
-		}
-		if cfg.Router != RouterEnvoy {
-			t.Errorf("Router = %q, want %q from --config", cfg.Router, RouterEnvoy)
-		}
-	})
-
-	t.Run("unset means no file layer", func(t *testing.T) {
-		fs, err := optionsFlagSet(Options{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := LoadFlags(fs, LoadOptions{})
-		if err != nil {
-			t.Fatalf("LoadFlags() error = %v", err)
-		}
-		if cfg.Router != RouterEnvoy {
-			t.Errorf("Router = %q, want the default", cfg.Router)
-		}
-	})
-}
-
 // A relative path means different files from different working directories,
 // and the shell installer changes to the repository root. The error names the
 // absolute path so that is visible rather than silent.
 func TestMissingConfigErrorNamesAbsolutePath(t *testing.T) {
 	loadEnv(t)
-	t.Setenv(ConfigPathEnv, "no-such-config.yaml")
 	fs, err := optionsFlagSet(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = LoadFlags(fs, LoadOptions{})
+	_, err = LoadFlags(fs, LoadOptions{ConfigPath: "no-such-config.yaml"})
 	if err == nil {
 		t.Fatal("LoadFlags() = nil error, want a missing-file error")
 	}

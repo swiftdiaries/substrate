@@ -52,8 +52,10 @@ const baseImportPaths = "--base-import-paths"
 type Runner struct {
 	// Root is the repository root; ko runs with this as its working directory.
 	Root string
-	// Env holds extra environment entries such as KO_DOCKER_REPO.
+	// Env is the complete sanitized environment for child tools.
 	Env []string
+	// BuildVersion is the resolved version shared with manifest rendering.
+	BuildVersion string
 	// Stderr receives ko's build progress output.
 	Stderr *os.File
 
@@ -62,19 +64,20 @@ type Runner struct {
 
 // New returns a Runner, resolving the ko binary once up front so a missing
 // tool fails before any cluster mutation happens.
-func New(root string, env []string) (*Runner, error) {
-	binary, err := findBinary(root)
+func New(root string, env []string, buildVersion string) (*Runner, error) {
+	binary, err := findBinary(root, env)
 	if err != nil {
 		return nil, err
 	}
-	return &Runner{Root: root, Env: env, Stderr: os.Stderr, binary: binary}, nil
+	return &Runner{Root: root, Env: env, BuildVersion: buildVersion, Stderr: os.Stderr, binary: binary}, nil
 }
 
 // findBinary resolves the pinned ko tool binary, mirroring hack/run-tool.sh.
-func findBinary(root string) (string, error) {
+func findBinary(root string, env []string) (string, error) {
 	toolDir := filepath.Join(root, "hack", "tools", "ko")
 	cmd := exec.Command("go", "tool", "-n", "ko")
 	cmd.Dir = toolDir
+	cmd.Env = env
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -98,7 +101,7 @@ func (r *Runner) Resolve(ctx context.Context, path string, stdinManifest []byte)
 	defer log.Elapsed(time.Now(), "ko resolve -f "+path)
 	cmd := exec.CommandContext(ctx, r.binary, r.args("resolve", "-f", path)...)
 	cmd.Dir = r.Root
-	cmd.Env = append(os.Environ(), r.Env...)
+	cmd.Env = r.Env
 	if path == "-" {
 		cmd.Stdin = bytes.NewReader(stdinManifest)
 	}
@@ -123,7 +126,7 @@ func (r *Runner) Build(ctx context.Context, importPath string) (string, error) {
 	defer log.Elapsed(time.Now(), "ko build "+importPath)
 	cmd := exec.CommandContext(ctx, r.binary, r.args("build", importPath)...)
 	cmd.Dir = r.Root
-	cmd.Env = append(os.Environ(), r.Env...)
+	cmd.Env = r.Env
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = r.Stderr
@@ -143,7 +146,7 @@ func (r *Runner) BuildTagged(ctx context.Context, tag string, importPaths ...str
 	defer log.Elapsed(time.Now(), "ko build --tags="+tag)
 	cmd := exec.CommandContext(ctx, r.binary, append(r.args("build", importPaths...), "--tags="+tag)...)
 	cmd.Dir = r.Root
-	cmd.Env = append(os.Environ(), r.Env...)
+	cmd.Env = r.Env
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = r.Stderr
@@ -180,17 +183,19 @@ func (r *Runner) args(subcommand string, target ...string) []string {
 
 // ldflags returns the version stamp ko should bake into binaries.
 func (r *Runner) ldflags() []string {
-	return []string{fmt.Sprintf("-X=%s.Version=%s", versionPkg, BuildVersion(r.Root))}
+	version := r.BuildVersion
+	if version == "" {
+		version = BuildVersion(r.Root, r.Env)
+	}
+	return []string{fmt.Sprintf("-X=%s.Version=%s", versionPkg, version)}
 }
 
-// BuildVersion is the VERSION environment variable, else `git describe`, or
+// BuildVersion is `git describe`, or
 // "dev" when git has nothing to say. It is what ko stamps into the binaries.
-func BuildVersion(root string) string {
-	if v := os.Getenv("VERSION"); v != "" {
-		return v
-	}
+func BuildVersion(root string, env []string) string {
 	cmd := exec.Command("git", "describe", "--tags", "--always", "--dirty")
 	cmd.Dir = root
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		return "dev"

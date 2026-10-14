@@ -18,8 +18,9 @@ set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-# Source the environment variables if configured
-if [[ -f .ate-dev-env.sh ]]; then
+# Standalone use keeps the developer environment; ate-setup supplies resolved
+# settings and sets NO_DEV_ENV so a stale dotfile cannot override them.
+if [[ -z "${NO_DEV_ENV:-}" && -f .ate-dev-env.sh ]]; then
   source .ate-dev-env.sh
 fi
 

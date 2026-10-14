@@ -42,12 +42,12 @@ var publishReleaseImagesCmd = &cobra.Command{
 	Use:   "release-images",
 	Short: "Build and push every image a pre-built install needs, tagged with the build version",
 	Long: `Build and push every component image, including the Dockerfile-built
-envoy-dataplane, to KO_DOCKER_REPO, all tagged with the build version (VERSION,
-else git describe), and print their pushed references.
+envoy-dataplane, to --ko-docker-repo, all tagged with the build version
+(--build-version, else git describe), and print their pushed references.
 
 The result is what "deploy --image-repo REPO --image-tag TAG" installs:
 
-  VERSION=TAG ate-setup publish release-images --ko-docker-repo REPO`,
+  ate-setup publish release-images --build-version TAG --ko-docker-repo REPO`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return env.PublishReleaseImages(cmd.Context(), cmd.OutOrStdout())

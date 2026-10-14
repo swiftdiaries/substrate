@@ -73,12 +73,12 @@ func init() {
 func (d *demo) Settings() []config.Setting {
 	return []config.Setting{
 		{
-			Key: "demo.counter.withExternalVolume", Env: "ATE_DEMO_COUNTER_WITH_EXTERNAL_VOLUME",
+			Key:  "demo.counter.withExternalVolume",
 			Flag: "with-external-volume", Kind: config.KindBool, Default: "false",
 			Usage: "Attach an external volume and validate a pre-seeded file on it (run \"setup csi\" first)",
 		},
 		{
-			Key: "demo.counter.storageClass", Env: "STORAGE_CLASS",
+			Key:  "demo.counter.storageClass",
 			Flag: "storage-class", Kind: config.KindString, Default: defaultStorageClass,
 			Usage: "StorageClass backing the external volume, e.g. csi-nfs-sc or csi-hostpath-sc. Must be used --with-external-volume=true.",
 		},

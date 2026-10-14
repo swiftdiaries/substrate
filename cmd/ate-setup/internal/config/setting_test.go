@@ -31,8 +31,11 @@ func TestRegistryCoversEveryChannel(t *testing.T) {
 			if s.Key == "" {
 				t.Error("Key is empty")
 			}
-			if s.Env == "" {
-				t.Error("Env is empty; the setting cannot be set from the environment")
+			if s.Secret && s.Env == "" {
+				t.Error("Env is empty; the secret cannot be set from the environment")
+			}
+			if !s.Secret && s.Env != "" {
+				t.Errorf("ordinary setting declares environment input %q", s.Env)
 			}
 			// Secrets are the exception: a command line is world-readable
 			// in `ps` and is kept in shell history, so a credential is
@@ -179,14 +182,13 @@ func TestIntAcceptanceIsTheSameOnEveryChannel(t *testing.T) {
 
 	for _, raw := range []string{"3x", "2.5", "0x10", "1e3", "12 34"} {
 		t.Run(raw, func(t *testing.T) {
-			_, envErr := Resolve(nil, ResolveOptions{Env: map[string]string{"SCRATCH_COUNT": raw}})
 			_, fileErr := Resolve(nil, ResolveOptions{File: fileWith(map[string]string{"scratch.count": raw})})
 			flagErr := resolveFlag(t, raw)
 
 			for _, c := range []struct {
 				channel string
 				err     error
-			}{{"environment", envErr}, {"file", fileErr}, {"flag", flagErr}} {
+			}{{"file", fileErr}, {"flag", flagErr}} {
 				if c.err == nil {
 					t.Errorf("the %s channel accepted %q as an integer", c.channel, raw)
 				}
