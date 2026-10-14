@@ -15,11 +15,96 @@
 package steps
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 )
+
+func TestLegacyHelperGetsNoDevEnv(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "helper.sh"), []byte("#!/bin/sh\ntest \"$NO_DEV_ENV\" = 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Env{Cfg: &config.Config{Root: root}}).runScript(t.Context(), "helper.sh"); err != nil {
+		t.Fatalf("legacy helper did not receive NO_DEV_ENV=1: %v", err)
+	}
+}
+
+func TestLegacyBenchmarkScriptsHonorNoDevEnv(t *testing.T) {
+	sourceRoot, err := config.RepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".ate-dev-env.sh"), []byte("exit 93\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"git":    "#!/bin/sh\necho \"$TEST_ROOT\"\n",
+		"docker": "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, rel := range []string{
+		"benchmarking/workloads/deploy.sh",
+		"benchmarking/locust/deploy.sh",
+		"benchmarking/locust/build_and_push.sh",
+	} {
+		dst := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(sourceRoot, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := filepath.Join(root, "benchmarking/workloads/manifests/workloads.yaml.tmpl")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		args []string
+	}{
+		{path: "benchmarking/workloads/deploy.sh", args: []string{"--help"}},
+		{path: "benchmarking/locust/deploy.sh", args: []string{"--help"}},
+		{path: "benchmarking/locust/build_and_push.sh"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			cmd := exec.Command("bash", append([]string{filepath.Join(root, tc.path)}, tc.args...)...)
+			cmd.Dir = root
+			cmd.Env = []string{
+				"PATH=" + bin + ":" + os.Getenv("PATH"),
+				"TEST_ROOT=" + root,
+				"NO_DEV_ENV=1",
+				"PROJECT_ID=test-project",
+				"BUCKET_NAME=test-bucket",
+			}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s sourced .ate-dev-env.sh or otherwise failed: %v\n%s", tc.path, err, out)
+			}
+		})
+	}
+}
 
 // deploy_locust.sh takes these as flags only, so anything not forwarded here is
 // silently lost. The expected lists are what deploy_benchmarks in the shell

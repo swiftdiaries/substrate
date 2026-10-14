@@ -49,7 +49,7 @@ This sequence keeps the previous binary compatible during a rollout and a tempor
 
 Store migration files in `cmd/ateapi/internal/store/atepg/migrations`.
 
-Standalone Substrate defaults to the `substrate` schema, including under Kagent's umbrella chart. Set `postgres.schema` in Helm or `ATE_API_POSTGRES_SCHEMA` in local setup to use another schema.
+Standalone Substrate defaults to the `substrate` schema, including under Kagent's umbrella chart. Set `postgres.schema` in Helm or `ateapi.postgres.schema` in the install config to use another schema.
 
 - Use the next sequential `NNNNNN_name.sql` filename.
 - Add exactly one `-- +goose Up` annotation.

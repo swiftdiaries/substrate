@@ -45,23 +45,23 @@ func useSettings(t *testing.T, settings ...Setting) {
 func fixtureSettings() []Setting {
 	return []Setting{
 		{
-			Key: "fixture.name", Env: "FIXTURE_NAME", Flag: "fixture-name",
+			Key: "fixture.name", Flag: "fixture-name",
 			Kind: KindString, Usage: "a string with no default",
 		},
 		{
-			Key: "fixture.mode", Env: "FIXTURE_MODE", Flag: "fixture-mode",
+			Key: "fixture.mode", Flag: "fixture-mode",
 			Kind: KindString, Default: "alpha", Usage: "a string with a default",
 		},
 		{
-			Key: "fixture.enabled", Env: "FIXTURE_ENABLED", Flag: "fixture-enabled",
+			Key: "fixture.enabled", Flag: "fixture-enabled",
 			Kind: KindBool, Default: "false", Usage: "a bool",
 		},
 		{
-			Key: "fixture.count", Env: "FIXTURE_COUNT", Flag: "fixture-count",
+			Key: "fixture.count", Flag: "fixture-count",
 			Kind: KindInt, Default: "1", Usage: "an int",
 		},
 		{
-			Key: "fixture.timeout", Env: "FIXTURE_TIMEOUT", Flag: "fixture-timeout",
+			Key: "fixture.timeout", Flag: "fixture-timeout",
 			Kind: KindDuration, Default: "1m0s", Usage: "a duration",
 		},
 		{
@@ -69,7 +69,7 @@ func fixtureSettings() []Setting {
 			Kind: KindString, Secret: true, Usage: "a secret",
 		},
 		{
-			Key: "fixture.nested.deep.key", Env: "FIXTURE_NESTED_DEEP_KEY",
+			Key:  "fixture.nested.deep.key",
 			Flag: "fixture-nested-deep-key", Kind: KindString, Usage: "a nested key",
 		},
 	}

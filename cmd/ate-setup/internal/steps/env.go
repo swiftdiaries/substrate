@@ -104,7 +104,7 @@ func (e *Env) Namespace() string {
 // to look healthy and then fails on a missing envFrom source.
 func (e *Env) RequireCanonicalNamespace(step string) error {
 	if ns := e.Namespace(); ns != NamespaceAteSystem {
-		return fmt.Errorf("%s cannot be used with ATE_NAMESPACE=%s: manifests/ate-install/ names %s literally; install into another namespace with a deployment that renders them, and use ate-setup only for the create steps", step, ns, NamespaceAteSystem)
+		return fmt.Errorf("%s cannot be used with --namespace=%s: manifests/ate-install/ names %s literally; install into another namespace with a deployment that renders them, and use ate-setup only for the create steps", step, ns, NamespaceAteSystem)
 	}
 	return nil
 }
@@ -130,7 +130,11 @@ func (e *Env) imageResolver() (imageResolver, error) {
 		return e.resolver, nil
 	}
 
-	runner, err := ko.New(e.Cfg.Root, e.Cfg.KoEnv())
+	version, _, err := e.SubstrateVersion()
+	if err != nil {
+		return nil, err
+	}
+	runner, err := ko.New(e.Cfg.Root, e.Cfg.ScriptEnv(), version)
 	if err != nil {
 		return nil, err
 	}

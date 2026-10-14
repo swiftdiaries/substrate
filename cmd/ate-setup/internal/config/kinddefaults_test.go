@@ -35,9 +35,7 @@ var kindDefaults = map[string]string{
 // install is about to use.
 func TestKindDefaultsReachTheReport(t *testing.T) {
 	loadEnv(t)
-	t.Setenv("ATE_INSTALL_KIND", "true")
-
-	cfg, err := Load(Options{})
+	cfg, err := Load(Options{Kind: true})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -62,9 +60,7 @@ func TestKindDefaultsReachTheReport(t *testing.T) {
 // all absent.
 func TestKindInstallRecordsWhatItUsed(t *testing.T) {
 	loadEnv(t)
-	t.Setenv("ATE_INSTALL_KIND", "true")
-
-	cfg, err := Load(Options{})
+	cfg, err := Load(Options{Kind: true})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -118,8 +114,11 @@ func TestKindRecordReplaysToTheSameInstall(t *testing.T) {
 
 	// Replay the record alone, with nothing in the environment.
 	loadEnv(t)
-	t.Setenv(ConfigPathEnv, path)
-	replayed, err := Load(Options{})
+	fs, err := optionsFlagSet(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := LoadFlags(fs, LoadOptions{ConfigPath: path})
 	if err != nil {
 		t.Fatalf("Load() from the record error = %v", err)
 	}

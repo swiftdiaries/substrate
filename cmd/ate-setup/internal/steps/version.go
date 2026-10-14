@@ -17,7 +17,6 @@ package steps
 import (
 	"context"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -38,26 +37,26 @@ import (
 // in that case. It has to be: the version names the atelet DaemonSet and sets
 // the node label that partitions nodes across coexisting versions, so it must
 // describe the atelet that is actually running, which came from the image.
-// VERSION still wins over both, so a tag that is not a valid label value can be
-// worked around the same way.
+// A source build can pin its version with --build-version.
 func (e *Env) SubstrateVersion() (version, suffix string, err error) {
 	if e.substrateVersion != "" {
 		return e.substrateVersion, e.substrateVersionSuffix, nil
 	}
 	var raw string
 	if e.Cfg.Images.IsPrebuilt() {
-		raw = os.Getenv("VERSION")
-		if raw == "" {
-			// The tag may carry its digest (v1@sha256:...); the version
-			// is the tag alone.
-			raw, _, _ = strings.Cut(e.Cfg.Images.Tag, "@")
+		if e.Cfg.BuildVersion != "" || e.Cfg.Resolved().Supplied("build.version") {
+			return "", "", fmt.Errorf("--build-version cannot be used with --image-repo; the prebuilt image tag supplies its version")
 		}
+		// The tag may carry its digest (v1@sha256:...); the version is the tag alone.
+		raw, _, _ = strings.Cut(e.Cfg.Images.Tag, "@")
 	} else {
-		// ko.BuildVersion consults VERSION itself before `git describe`.
-		raw = ko.BuildVersion(e.Cfg.Root)
+		raw = e.Cfg.BuildVersion
+		if raw == "" {
+			raw = ko.BuildVersion(e.Cfg.Root, e.Cfg.ScriptEnv())
+		}
 	}
 	if v := versionlabel.Value(raw); v != raw {
-		return "", "", fmt.Errorf("build version %q is not a valid label value (it would sanitize to %q); pin a label-safe one with the VERSION env var", raw, v)
+		return "", "", fmt.Errorf("build version %q is not a valid label value (it would sanitize to %q); set a label-safe value with --build-version", raw, v)
 	}
 	e.substrateVersion = raw
 	e.substrateVersionSuffix = versionlabel.NameSuffix(raw)

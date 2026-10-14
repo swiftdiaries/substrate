@@ -17,20 +17,50 @@
 # Installs Agent Substrate.
 #
 # This is a translation shim: cmd/ate-setup carries out every action, and this
-# script only maps the flags and environment variables the installer has always
-# accepted onto its commands, so existing command lines and CI jobs keep
-# working unchanged. It deliberately holds no install logic of its own.
+# script maps its action flags onto commands. Ordinary settings come from
+# --config or explicit flags; only secret inputs and native tool credentials
+# remain in the environment.
 #
 # New work belongs in cmd/ate-setup. See cmd/ate-setup/commands.md for the
 # equivalent invocation of each flag below, and cmd/ate-setup/cli-diff.md for
 # the behaviors that differ after the move.
 #
-# The environment variables the installer reads -- BUCKET_NAME, KO_DOCKER_REPO,
-# PROJECT_ID, CLUSTER_NAME, CLUSTER_LOCATION, KUBECTL_CONTEXT, NO_DEV_ENV, the
-# ATE_API_POSTGRES_* set, and the rest -- are read by ate-setup directly, as is
-# .ate-dev-env.sh. They need no translation and are not repeated here.
+# KUBECONFIG and native cloud credentials keep their tool-defined behavior.
+# PostgreSQL DSNs and ANTHROPIC_API_KEY are the only installer settings read
+# from the environment; ordinary settings use --config or flags.
 
 set -o errexit -o nounset -o pipefail
+
+CALLER_DIR="$PWD"
+
+caller_path() {
+  local path="$1"
+  if [[ -z "${path}" || "${path}" = /* ]]; then
+    printf '%s' "${path}"
+  else
+    printf '%s/%s' "${CALLER_DIR}" "${path}"
+  fi
+}
+
+# Keep kubeconfig paths relative to the directory that invoked the shim even
+# though the shim runs ate-setup from the repository root. Empty list entries
+# and absolute paths keep client-go's native KUBECONFIG semantics.
+caller_kubeconfig() {
+  local remaining="$1" entry result="" separator=""
+  while :; do
+    entry="${remaining%%:*}"
+    [[ -z "${entry}" || "${entry}" = /* ]] || entry="${CALLER_DIR}/${entry}"
+    result+="${separator}${entry}"
+    [[ "${remaining}" == *:* ]] || break
+    remaining="${remaining#*:}"
+    separator=":"
+  done
+  printf '%s' "${result}"
+}
+if [[ -n "${KUBECONFIG:-}" ]]; then
+  KUBECONFIG="$(caller_kubeconfig "${KUBECONFIG}")"
+  export KUBECONFIG
+fi
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
@@ -58,13 +88,14 @@ demo_usage() {
   case "$1" in
     demo-counter)
       echo "  --deploy-demo-counter-with-external-volume    Deploy demo-counter with external volume validation"
-      echo "                                                (STORAGE_CLASS names the class; it otherwise follows --setup-csi)"
+      echo "  --with-external-volume                        Attach the volume when using the ate-setup command"
+      echo "  --storage-class NAME                          StorageClass backing the external volume"
       ;;
     demo-counter-microvm|demo-egress-microvm)
       echo "  Needs hack/install-microvm-deps.sh --install to have run (cluster-wide microvm SandboxConfig)."
       ;;
     demo-claude-code-multiplex)
-      echo "  Required env: ANTHROPIC_API_KEY, BUCKET_NAME, KO_DOCKER_REPO"
+      echo "  Required env: ANTHROPIC_API_KEY; configure --storage-bucket-name and --ko-docker-repo"
       echo "  See demos/claude-code-multiplex/README.md for the walkthrough."
       ;;
     demo-autoscaled-workerpool)
@@ -78,15 +109,11 @@ usage() {
   echo ""
   echo "Configuration:"
   echo ""
-  echo "  ATE_CONFIG=PATH                        Read settings from a configuration document. Every setting below that"
-  echo "                                         names an environment variable can be set there instead, including the"
-  echo "                                         ones this script turns into flags. Settings in the document outrank"
-  echo "                                         the environment; a flag passed here outranks both."
+  echo "  --config PATH                          Read settings from a configuration document; explicit flags override it."
+  echo "                                         Relative paths are resolved from the directory that called this script."
   echo "                                         See docs/operator-install.md."
   echo ""
-  echo "  ATE_NO_REPORT_DEFAULTS=1               List only the settings something set in the configuration"
-  echo "                                         report, rather than every setting and where it came from."
-  echo "  --config PATH                          Read a configuration document for this invocation."
+  echo "  --no-report-defaults                   List only settings supplied by the file or flags."
   echo "  --kind                                 Apply the local Kind defaults."
   echo "  --docker-build-flags FLAGS             Pass build flags to the Docker-built dataplane image."
   echo ""
@@ -114,8 +141,7 @@ usage() {
   echo ""
   echo "Egress credential injection (required by --deploy-ate-system and --deploy-atenet):"
   echo ""
-  echo "  --credential-provider JSON             Credential provider the egress gateway injects credentials from, or"
-  echo "                                         ATE_CREDENTIAL_PROVIDER. One of:"
+  echo "  --credential-provider JSON             Credential provider the egress gateway injects credentials from. One of:"
   echo "                                           '{\"name\":\"k8s.io\"}'  deploy the bundled Kubernetes Secrets provider,"
   echo "                                                                with a NetworkPolicy that admits only the egress gateway"
   echo "                                           '{\"enabled\":false}'  turn injection off"
@@ -144,31 +170,31 @@ usage() {
   echo "PostgreSQL configuration (a connection DSN or Cloud SQL instance selects"
   echo "an external database and skips the bundled instance):"
   echo ""
-  echo "  ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING  Application DSN for external PostgreSQL (stored in a Secret;"
-  echo "                                         pair with ATE_API_POSTGRES_SERVER_CA_FILE for sslmode=verify-ca)"
-  echo "  ATE_API_POSTGRES_OWNER_CONNECTION_STRING       Optional owner DSN; defaults to the read/write DSN"
-  echo "  ATE_API_POSTGRES_READ_WRITE_ROLE       Role assumed by the read/write pool (default: substrate_readwrite)"
-  echo "  ATE_API_POSTGRES_OWNER_ROLE            Role assumed by the owner pool (default: substrate_owner)"
-  echo "  ATE_API_POSTGRES_CLOUDSQL_INSTANCE     Cloud SQL instance connection name (project:region:instance)."
+  echo "  ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING  Secret application DSN for external PostgreSQL (stored in a Secret;"
+  echo "                                         pair with --ateapi-postgres-server-ca-file for sslmode=verify-ca)"
+  echo "  ATE_API_POSTGRES_OWNER_CONNECTION_STRING       Optional secret owner DSN; defaults to the read/write DSN"
+  echo "  --ateapi-postgres-read-write-role ROLE         Role assumed by the read/write pool (default: substrate_readwrite)"
+  echo "  --ateapi-postgres-owner-role ROLE              Role assumed by the owner pool (default: substrate_owner)"
+  echo "  --ateapi-postgres-cloudsql-instance NAME       Cloud SQL instance connection name (project:region:instance)."
   echo "                                         Deploys the Cloud SQL Auth Proxy sidecar: connector-managed TLS"
   echo "                                         and automatic IAM database auth, no passwords (see tools/setup-gcp/cloud-sql.md)."
   echo "                                         Unset = keep the cluster's current Cloud SQL config; set to \"\" to remove it"
-  echo "  ATE_API_POSTGRES_CLOUDSQL_GSA          GSA email backing Workload Identity + the IAM database user"
-  echo "  ATE_API_POSTGRES_CLOUDSQL_IP_TYPE      private (default) | public | psc"
-  echo "  ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH     true (default) | false (password-over-proxy escape hatch)"
-  echo "  ATE_API_POSTGRES_POOL_MAX_CONNS        pgxpool max connections per ateapi replica (default: max(4, NumCPU))"
-  echo "  ATE_API_POSTGRES_SERVER_CA_FILE        PEM file to mount for verify-ca DSNs (non-Cloud-SQL databases)"
-  echo "  ATE_API_POSTGRES_SCHEMA                Select the Substrate schema (default: substrate)"
+  echo "  --ateapi-postgres-cloudsql-gsa EMAIL           GSA email backing Workload Identity + the IAM database user"
+  echo "  --ateapi-postgres-cloudsql-ip-type TYPE        private (default) | public | psc"
+  echo "  --ateapi-postgres-cloudsql-iam-auth BOOL       true (default) | false (password-over-proxy escape hatch)"
+  echo "  --ateapi-postgres-pool-max-conns N             pgxpool max connections per ateapi replica (default: max(4, NumCPU))"
+  echo "  --ateapi-postgres-server-ca-file PATH          PEM file to mount for verify-ca DSNs (non-Cloud-SQL databases)"
+  echo "  --ateapi-postgres-schema NAME                  Select the Substrate schema (default: substrate)"
   echo ""
   echo "Authentication configuration:"
   echo ""
-  echo "  EXPECTED_JWT_ISSUER                    Issuer URL ate-api-server requires in service account tokens, verbatim."
+  echo "  --ateapi-expected-jwt-issuer URL       Issuer URL ate-api-server requires in service account tokens, verbatim."
   echo "                                         Default: derived from PROJECT_ID/CLUSTER_LOCATION/CLUSTER_NAME"
   echo "                                         (https://container.googleapis.com/v1/projects/.../clusters/...),"
   echo "                                         else the cluster's OIDC discovery document"
-  echo "  ACTOR_JWT_ALGORITHM                    Signing algorithm of a newly created actor JWT pool: ES256 (default) | RS256."
+  echo "  --actor-jwt-algorithm ALGORITHM        Signing algorithm of a newly created actor JWT pool: ES256 (default) | RS256."
   echo "                                         Use RS256 (a 4096-bit RSA key) for relying parties that don't support ES256. Has no effect once the pool exists."
-  echo "  ACTOR_JWT_ISSUER                       iss claim of actor JWTs, verbatim. Relying parties fetch <issuer>/.well-known/openid-configuration."
+  echo "  --actor-jwt-issuer URL                  iss claim of actor JWTs, verbatim. Relying parties fetch <issuer>/.well-known/openid-configuration."
   echo "                                         Default: https://idp.<namespace>.svc"
   echo ""
   echo "Benchmarks (see benchmarking/README.md for details and customization):"
@@ -199,22 +225,6 @@ ate_setup() {
   go run ./cmd/ate-setup ${GLOBAL_FLAGS[@]+"${GLOBAL_FLAGS[@]}"} "$@"
 }
 
-# counter_storage_class names the StorageClass the counter demo's external
-# volume is provisioned from. STORAGE_CLASS names it outright; without it, fall
-# back to whatever --setup-csi just installed, and to ate-setup's own default
-# when it installed nothing.
-counter_storage_class() {
-  if [[ -n "${STORAGE_CLASS:-}" ]]; then
-    echo "${STORAGE_CLASS}"
-    return
-  fi
-  case "${SETUP_CSI}" in
-    hostpath) echo "csi-hostpath-sc" ;;
-    nfs|both|true) echo "csi-nfs-sc" ;;
-    *) echo "standard" ;;
-  esac
-}
-
 # run_demo maps --deploy-demo-NAME / --delete-demo-NAME onto
 # `ate-setup {deploy,delete} demo NAME`. A demo this installer does not
 # register is rejected the way any other unknown flag is, rather than reaching
@@ -225,7 +235,11 @@ run_demo() {
   local known
   for known in "${ATE_DEMOS[@]}"; do
     if [[ "${demo}" == "${known}" ]]; then
-      ate_setup "${action}" demo "${demo#demo-}"
+      if [[ "${demo}" == "demo-counter" ]]; then
+        ate_setup "${action}" demo counter ${COUNTER_FLAGS[@]+"${COUNTER_FLAGS[@]}"}
+      else
+        ate_setup "${action}" demo "${demo#demo-}"
+      fi
       return
     fi
   done
@@ -258,142 +272,165 @@ GLOBAL_FLAGS=()
 # Valid values for SETUP_CSI: nfs, hostpath, both, none. Defaults to none: a
 # CSI driver is an opt-in extra, and NFS needs kernel modules a plain
 # workstation will not have loaded.
-SETUP_CSI="${SETUP_CSI:-none}"
+SETUP_CSI=""
+SETUP_CSI_SET=0
 BENCHMARK_FLAGS=()
+COUNTER_FLAGS=()
+GLOBAL_VALUE_FLAGS=(
+  --kind-cluster-name --namespace --kubeconfig --context --gcp-project-id --gcp-cluster-name --gcp-cluster-location
+  --ko-docker-repo --ko-default-platforms --build-version --actor-jwt-algorithm --actor-jwt-issuer
+  --docker-build-flags --image-repo --image-tag --storage-bucket-name --atenet-dataplane
+  --experimental-additional-egress-extproc-service --ateapi-expected-jwt-issuer --credential-provider
+  --ateapi-postgres-read-write-role --ateapi-postgres-owner-role --ateapi-postgres-schema
+  --ateapi-postgres-pool-max-conns --ateapi-postgres-server-ca-file --ateapi-postgres-storage-class
+  --ateapi-postgres-cloudsql-instance --ateapi-postgres-cloudsql-gsa --ateapi-postgres-cloudsql-iam-auth
+  --ateapi-postgres-cloudsql-ip-type --podcert-workers-per-signer --rollout-timeout --cluster-size
+  --otlp-endpoint --benchmark-actor-memory --record-dir --config
+)
+GLOBAL_BOOL_FLAGS=(--kind --cordon-control-plane --no-report-defaults)
 prescan_args=("$@")
+
+# A Docker build flag may start with `--`; reject only options and actions the
+# shim itself owns so a missing value cannot consume the requested action.
+is_shim_option_or_action() {
+  local token="${1%%=*}" flag
+  for flag in "${GLOBAL_VALUE_FLAGS[@]}" "${GLOBAL_BOOL_FLAGS[@]}"; do
+    [[ "${token}" == "${flag}" ]] && return 0
+  done
+  case "${token}" in
+    --setup-csi|--benchmark-worker-count|--benchmark-sandbox-class|--storage-class|--with-external-volume|\
+    --deploy-ate-system|--delete-ate-system|--delete-all|--deploy-atelet|--deploy-ate-apiserver|\
+    --deploy-atenet|--delete-atenet|--deploy-benchmarks|--delete-benchmarks|\
+    --create-jwt-authority-pool-secret|--create-actor-id-ca-pool-secret|--create-actor-id-ca-certs-secret|\
+    --create-egress-mitm-ca-pool-secret|--create-podcertificate-controller-cas|\
+    --create-api-server-env-vars|--create-api-authentication-config|--deploy-demo-*|--delete-demo-*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 for ((i = 0; i < ${#prescan_args[@]}; i++)); do
-  case "${prescan_args[i]}" in
-    --atenet-dataplane=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --kind=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --config=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --docker-build-flags=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --kind) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --config)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --config requires a path" >&2
+  handled=0
+  for flag in "${GLOBAL_VALUE_FLAGS[@]}"; do
+    if [[ "${prescan_args[i]}" == "${flag}="* ]]; then
+      value="${prescan_args[i]#*=}"
+      if [[ "${flag}" == "--config" || "${flag}" == "--kubeconfig" ]]; then
+        value="$(caller_path "${value}")"
+      fi
+      GLOBAL_FLAGS+=("${flag}=${value}")
+      handled=1
+      break
+    elif [[ "${prescan_args[i]}" == "${flag}" ]]; then
+      if (( i + 1 >= ${#prescan_args[@]} )) || \
+          { [[ "${flag}" == "--docker-build-flags" ]] && is_shim_option_or_action "${prescan_args[$((i + 1))]}"; } || \
+          { [[ "${prescan_args[$((i + 1))]}" == --* ]] && [[ "${flag}" != "--docker-build-flags" ]]; }; then
+        echo "Error: ${flag} requires a value" >&2
         exit 1
       fi
-      GLOBAL_FLAGS+=("--config=${prescan_args[$((i + 1))]}")
-      ;;
-    --docker-build-flags)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --docker-build-flags requires a value" >&2
-        exit 1
+      value="${prescan_args[$((i + 1))]}"
+      if [[ "${flag}" == "--config" || "${flag}" == "--kubeconfig" ]]; then
+        value="$(caller_path "${value}")"
       fi
-      GLOBAL_FLAGS+=("--docker-build-flags=${prescan_args[$((i + 1))]}")
-      ;;
-    --atenet-dataplane)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --atenet-dataplane requires envoy or agentgateway" >&2
-        exit 1
-      fi
-      GLOBAL_FLAGS+=("--atenet-dataplane=${prescan_args[$((i + 1))]}")
-      ;;
-    --experimental-additional-egress-extproc-service=*)
+      GLOBAL_FLAGS+=("${flag}=${value}")
+      ((i += 1))
+      handled=1
+      break
+    fi
+  done
+  if (( handled )); then
+    continue
+  fi
+  for flag in "${GLOBAL_BOOL_FLAGS[@]}"; do
+    if [[ "${prescan_args[i]}" == "${flag}" || "${prescan_args[i]}" == "${flag}="* ]]; then
       GLOBAL_FLAGS+=("${prescan_args[i]}")
-      ;;
-    --experimental-additional-egress-extproc-service)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --experimental-additional-egress-extproc-service requires <namespace>/<service>:<port>" >&2
-        exit 1
+      handled=1
+      break
+    fi
+  done
+  if (( handled )); then
+    continue
+  fi
+  case "${prescan_args[i]}" in
+    --setup-csi=*) SETUP_CSI="${prescan_args[i]#*=}"; SETUP_CSI_SET=1 ;;
+    --setup-csi)
+      if (( i + 1 < ${#prescan_args[@]} )) && [[ "${prescan_args[$((i + 1))]}" != --* ]]; then
+        SETUP_CSI="${prescan_args[$((i + 1))]}"
+        ((i += 1))
+      else
+        SETUP_CSI="nfs"
       fi
-      GLOBAL_FLAGS+=("--experimental-additional-egress-extproc-service=${prescan_args[$((i + 1))]}")
-      ;;
-    --credential-provider=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --credential-provider)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --credential-provider requires a JSON value, e.g. '{\"name\":\"k8s.io\"}'" >&2
-        exit 1
-      fi
-      GLOBAL_FLAGS+=("--credential-provider=${prescan_args[$((i + 1))]}")
-      ;;
-    --podcert-workers-per-signer=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --podcert-workers-per-signer)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --podcert-workers-per-signer requires a positive integer" >&2
-        exit 1
-      fi
-      GLOBAL_FLAGS+=("--podcert-workers-per-signer=${prescan_args[$((i + 1))]}")
-      ;;
-    --cluster-size=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --cluster-size)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --cluster-size requires size0 or size10" >&2
-        exit 1
-      fi
-      GLOBAL_FLAGS+=("--cluster-size=${prescan_args[$((i + 1))]}")
-      ;;
-    --cordon-control-plane|--cordon-control-plane=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --rollout-timeout=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --rollout-timeout)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --rollout-timeout requires a Go duration (e.g. 300s, 10m)" >&2
-        exit 1
-      fi
-      GLOBAL_FLAGS+=("--rollout-timeout=${prescan_args[$((i + 1))]}")
-      ;;
-    --otlp-endpoint=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
-    --otlp-endpoint)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --otlp-endpoint requires a URL" >&2
-        exit 1
-      fi
-      GLOBAL_FLAGS+=("--otlp-endpoint=${prescan_args[$((i + 1))]}")
+      SETUP_CSI_SET=1
       ;;
     --benchmark-worker-count=*) BENCHMARK_FLAGS+=("--worker-count=${prescan_args[i]#*=}") ;;
     --benchmark-worker-count)
-      BENCHMARK_FLAGS+=("--worker-count=${prescan_args[i+1]:-1}")
+      if (( i + 1 >= ${#prescan_args[@]} )) || [[ "${prescan_args[$((i + 1))]}" == --* ]]; then
+        echo "Error: --benchmark-worker-count requires a number" >&2
+        exit 1
+      fi
+      BENCHMARK_FLAGS+=("--worker-count=${prescan_args[$((i + 1))]}")
       ;;
     --benchmark-sandbox-class=*) BENCHMARK_FLAGS+=("--sandbox-class=${prescan_args[i]#*=}") ;;
     --benchmark-sandbox-class)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
+      if (( i + 1 >= ${#prescan_args[@]} )) || [[ "${prescan_args[$((i + 1))]}" == --* ]]; then
         echo "Error: --benchmark-sandbox-class requires gvisor or microvm" >&2
         exit 1
       fi
       BENCHMARK_FLAGS+=("--sandbox-class=${prescan_args[$((i + 1))]}")
       ;;
-    # The benchmark actor memory has no ate-setup flag; it is read from the
-    # environment, which is also how the benchmark scripts have always taken it.
-    --benchmark-actor-memory=*) export BENCHMARK_ACTOR_MEMORY="${prescan_args[i]#*=}" ;;
-    --benchmark-actor-memory)
-      if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --benchmark-actor-memory requires a size (e.g. 256Mi)" >&2
+    --storage-class=*) COUNTER_FLAGS+=("${prescan_args[i]}") ;;
+    --storage-class)
+      if (( i + 1 >= ${#prescan_args[@]} )) || [[ "${prescan_args[$((i + 1))]}" == --* ]]; then
+        echo "Error: --storage-class requires a value" >&2
         exit 1
       fi
-      export BENCHMARK_ACTOR_MEMORY="${prescan_args[$((i + 1))]}"
+      COUNTER_FLAGS+=("--storage-class=${prescan_args[$((i + 1))]}")
+      ((i += 1))
       ;;
-    --setup-csi=*) SETUP_CSI="${prescan_args[i]#*=}" ;;
-    --setup-csi)
-      if (( i + 1 < ${#prescan_args[@]} )) && [[ "${prescan_args[$((i + 1))]}" != --* ]]; then
-        SETUP_CSI="${prescan_args[$((i + 1))]}"
-      else
-        SETUP_CSI="nfs"
-      fi
-      ;;
+    --with-external-volume|--with-external-volume=*) COUNTER_FLAGS+=("${prescan_args[i]}") ;;
   esac
 done
 
 # Actions run in command line order, one ate-setup invocation each, so a single
 # line can still ask for several of them.
 while [[ "$#" -gt 0 ]]; do
+  skip=0
+  for flag in "${GLOBAL_VALUE_FLAGS[@]}"; do
+    if [[ "$1" == "${flag}="* ]]; then
+      skip=1
+      break
+    elif [[ "$1" == "${flag}" ]]; then
+      skip=2
+      break
+    fi
+  done
+  if (( ! skip )); then
+    for flag in "${GLOBAL_BOOL_FLAGS[@]}"; do
+      if [[ "$1" == "${flag}" || "$1" == "${flag}="* ]]; then
+        skip=1
+        break
+      fi
+    done
+  fi
+  if (( skip )); then
+    shift "${skip}"
+    continue
+  fi
   case $1 in
     # Captured in the pre-scan above; matched here only so the `*)` branch does
     # not reject them, and so a separated value is consumed with its flag.
-    --atenet-dataplane|--podcert-workers-per-signer|--rollout-timeout|--otlp-endpoint) shift ;;
-    --config|--docker-build-flags) shift ;;
-    --kind) ;;
-    --cluster-size) shift ;;
-    --experimental-additional-egress-extproc-service) shift ;;
-    --credential-provider) shift ;;
     --benchmark-worker-count|--benchmark-sandbox-class|--benchmark-actor-memory) shift ;;
-    --atenet-dataplane=*|--podcert-workers-per-signer=*|--rollout-timeout=*|--otlp-endpoint=*) ;;
-    --kind=*|--config=*|--docker-build-flags=*) ;;
-    --cluster-size=*|--cordon-control-plane|--cordon-control-plane=*) ;;
-    --experimental-additional-egress-extproc-service=*) ;;
-    --credential-provider=*) ;;
     --benchmark-worker-count=*|--benchmark-sandbox-class=*|--benchmark-actor-memory=*) ;;
+    --storage-class) shift ;;
+    --storage-class=*|--with-external-volume|--with-external-volume=*) ;;
 
-    --deploy-ate-system) ate_setup deploy ate-system "--setup-csi=${SETUP_CSI}" ;;
+    --deploy-ate-system)
+      if (( SETUP_CSI_SET )); then
+        ate_setup deploy ate-system "--setup-csi=${SETUP_CSI}"
+      else
+        ate_setup deploy ate-system
+      fi
+      ;;
     --setup-csi=*) ate_setup setup csi "${SETUP_CSI}" ;;
     --setup-csi)
       if [[ "$#" -gt 1 && "$2" != --* ]]; then
@@ -423,8 +460,7 @@ while [[ "$#" -gt 0 ]]; do
 
     # The one demo flag that is not just a demo name.
     --deploy-demo-counter-with-external-volume)
-      ate_setup deploy demo counter --with-external-volume \
-        "--storage-class=$(counter_storage_class)"
+      ate_setup deploy demo counter --with-external-volume ${COUNTER_FLAGS[@]+"${COUNTER_FLAGS[@]}"}
       ;;
     --deploy-demo-*) run_demo deploy "$1" ;;
     --delete-demo-*) run_demo delete "$1" ;;

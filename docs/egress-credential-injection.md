@@ -134,8 +134,8 @@ no injection says so with `{"enabled":false}`.
 hack/install-ate.sh --deploy-atenet --credential-provider='{"name":"k8s.io"}'
 ```
 
-`--credential-provider` (or `ATE_CREDENTIAL_PROVIDER` when the flag is
-absent) is a JSON object with these keys; any other key is an error:
+`--credential-provider` or the `atenet.egress.credentialProvider` config key
+accepts a JSON object with these keys; any other key is an error:
 
 | Key | Value |
 |---|---|

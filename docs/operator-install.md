@@ -1,9 +1,9 @@
 # Installing Agent Substrate as an operator
 
-Every setting the installer reads can be supplied three ways: a flag, an
-environment variable, or a configuration document. This page describes the
-document, because it is the only one of the three an operator owns as a file,
-reviews in a change, and reuses across runs.
+Ordinary installer settings come from defaults, a configuration file, or flags.
+Only the read/write DSN, owner DSN, and Anthropic API key accept environment
+input; a file overrides those secrets. This page describes the configuration
+file, which operators can review and reuse across runs.
 
 ## The document
 
@@ -19,16 +19,14 @@ images:
   tag: v0.4.1
 ```
 
-Pass it with `--config`, or name it in `ATE_CONFIG`:
+Pass it with `--config`:
 
 ```bash
 ate-setup deploy ate-system --config substrate-install.yaml
-ATE_CONFIG=substrate-install.yaml hack/install-ate.sh --deploy-ate-system
+hack/install-ate.sh --config substrate-install.yaml --deploy-ate-system
 ```
 
-`ATE_CONFIG` is how the document reaches the shell installer, which forwards
-only a fixed set of flags and otherwise passes settings by inheriting the
-environment.
+The shell installer forwards `--config` to each action.
 
 A worked example is at [docs/examples/substrate-install.yaml](examples/substrate-install.yaml).
 
@@ -56,12 +54,12 @@ on screen to say so.
 Lowest to highest:
 
 ```
-default  <  environment  <  configuration file  <  flag
+default  <  configuration file  <  flag
 ```
 
-The file outranks the environment deliberately: the file is the artifact an
-operator wrote and can review, and ambient state left in a shell must not
-silently outrank it. A flag outranks both because it was typed for this run.
+Flags override file values because they were supplied for this run. The three
+secret inputs are the exception: environment values are accepted, and a secret
+value in the file overrides its environment value.
 
 A channel that does not mention a setting leaves the one below it in place, so
 a document need only name what differs from the defaults.
@@ -76,42 +74,26 @@ namespace: ""
 ```
 
 ```bash
-export ATE_NAMESPACE=      # the same thing
 ate-setup deploy ate-system --namespace=
 ```
 
-All three clear the setting rather than falling through to the default. That
+Both clear the setting rather than falling through to the default. That
 is how a setting is removed from an installation: write its zero value and
 re-apply.
 
-Only an *absent* setting falls through. In the shell that distinction is the
-difference between `export FOO=` and `unset FOO`, and the two do not mean the
-same thing here:
-
-| Shell                           | Meaning                          |
-|---------------------------------|----------------------------------|
-| `unset ATE_NAMESPACE`           | not set; the layer below applies |
-| `export ATE_NAMESPACE=`         | set to empty                     |
-| `export ATE_NAMESPACE=ate-prod` | set to `ate-prod`                |
-
-A script that exports an empty variable to mean "unset" is configuring the
-setting. The report names the channel each value came from, so when that
-happens it is visible rather than mysterious.
-
-For a setting that is not a string, an empty value is not a value of its kind
-and is reported as such -- `ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER=` is
-rejected, naming the variable, rather than quietly ignored.
+Only an *absent* setting falls through. Ordinary settings have no environment
+channel; empty file values and explicit empty flags remain supplied values.
 
 ## Every run reports what it resolved
 
-Every setting is listed with the channel that supplied it:
+Every setting is listed with its source:
 
 ```
 configuration: 6 set, 35 default
   ateapi.expectedJWTIssuer                    ""            (from default)
   ateapi.postgres.readWrite.connectionString  <set>         (from ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING)
   ...
-  atenet.dataplane                            agentgateway  (from ATE_ATENET_DATAPLANE)
+  atenet.dataplane                            envoy         (from default)
   benchmark.sandboxClass                      microvm       (from --sandbox-class)
   benchmark.workerCount                       7             (from config.benchmark.workerCount)
   clusterSize                                 size0         (from default)
@@ -119,10 +101,8 @@ configuration: 6 set, 35 default
   namespace                                   ate-prod      (from config.namespace)
 ```
 
-An install that succeeds with the wrong value never produces an error, so this
-report is the only place an inherited variable or a forgotten file becomes
-visible -- and a value that came from a default is worth seeing for the same
-reason, because next release it may be a different default.
+The report shows which file or flag supplied each setting and makes defaults
+visible when they affect the install.
 
 A setting marked secret in the table below prints as `<set>` when something
 supplied it, with the channel still named so you know where to change it. One
@@ -133,20 +113,19 @@ To list only what was set:
 
 ```bash
 ate-setup deploy ate-system --no-report-defaults
-export ATE_NO_REPORT_DEFAULTS=1          # the same, for a shell that runs it repeatedly
 ```
 
 ```
 configuration: 6 set, 35 default
   ateapi.postgres.readWrite.connectionString  <set>         (from ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING)
-  atenet.dataplane                            agentgateway  (from ATE_ATENET_DATAPLANE)
+  atenet.dataplane                            envoy         (from default)
   benchmark.sandboxClass                      microvm       (from --sandbox-class)
   benchmark.workerCount                       7             (from config.benchmark.workerCount)
   context                                     kind-kind     (from the --kind profile)
   namespace                                   ate-prod      (from config.namespace)
 ```
 
-## Errors name the channel
+## Errors name the source
 
 ```
 Error: atenet.dataplane must be envoy or agentgateway, got "nginx" (from config.atenet.dataplane)
@@ -157,8 +136,8 @@ Error: at least one of ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING or
 ## Command-scoped settings
 
 Most settings apply to every command and are flags on the root. A few belong
-to one command and are flags only there — but they are still reachable from
-the environment and the file, so one document can describe a whole install:
+to one command and are flags only there; the configuration file can describe
+a whole install:
 
 ```yaml
 csi:
@@ -228,7 +207,7 @@ how several operators share one configuration and how an install survives a
 cluster that no longer exists:
 
 ```bash
-export ATE_RECORD_DIR=~/ops/substrate-installs
+ate-setup deploy ate-system --record-dir ~/ops/substrate-installs --config substrate-install.yaml
 ```
 
 Records hold no credentials, so they are safe to commit. They are written
@@ -264,58 +243,66 @@ changes it.
 Defaults are also shown by `ate-setup --help` and by `--help` on the owning
 command. A setting with no default is unset unless something supplies it.
 
-| Key                                          | Environment variable                            | Flag                                               | Default               | Applies to                               |
+| Key                                          | Environment input / tool convention                            | Flag                                               | Default               | Applies to                               |
 |----------------------------------------------|-------------------------------------------------|----------------------------------------------------|-----------------------|------------------------------------------|
-| `actorJWT.algorithm`                         | `ACTOR_JWT_ALGORITHM`                           | `--actor-jwt-algorithm`                            | `ES256`               | (global)                                 |
-| `actorJWT.issuer`                            | `ACTOR_JWT_ISSUER`                              | `--actor-jwt-issuer`                               | —                     | (global)                                 |
-| `ateapi.expectedJWTIssuer`                   | `EXPECTED_JWT_ISSUER`                           | `--ateapi-expected-jwt-issuer`                     | —                     | (global)                                 |
-| `ateapi.postgres.cloudsql.gsa`               | `ATE_API_POSTGRES_CLOUDSQL_GSA`                 | `--ateapi-postgres-cloudsql-gsa`                   | —                     | (global)                                 |
-| `ateapi.postgres.cloudsql.iamAuth`           | `ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH`            | `--ateapi-postgres-cloudsql-iam-auth`              | —                     | (global)                                 |
-| `ateapi.postgres.cloudsql.instance`          | `ATE_API_POSTGRES_CLOUDSQL_INSTANCE`            | `--ateapi-postgres-cloudsql-instance`              | —                     | (global)                                 |
-| `ateapi.postgres.cloudsql.ipType`            | `ATE_API_POSTGRES_CLOUDSQL_IP_TYPE`             | `--ateapi-postgres-cloudsql-ip-type`               | —                     | (global)                                 |
-| `ateapi.postgres.owner.connectionString`     | `ATE_API_POSTGRES_OWNER_CONNECTION_STRING`      | — (no flag)                                        | — (secret)            | (global)                                 |
-| `ateapi.postgres.owner.role`                 | `ATE_API_POSTGRES_OWNER_ROLE`                   | `--ateapi-postgres-owner-role`                     | `substrate_owner`     | (global)                                 |
-| `ateapi.postgres.poolMaxConns`               | `ATE_API_POSTGRES_POOL_MAX_CONNS`               | `--ateapi-postgres-pool-max-conns`                 | —                     | (global)                                 |
-| `ateapi.postgres.readWrite.connectionString` | `ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING` | — (no flag)                                        | — (secret)            | (global)                                 |
-| `ateapi.postgres.readWrite.role`             | `ATE_API_POSTGRES_READ_WRITE_ROLE`              | `--ateapi-postgres-read-write-role`                | `substrate_readwrite` | (global)                                 |
-| `ateapi.postgres.schema`                     | `ATE_API_POSTGRES_SCHEMA`                       | `--ateapi-postgres-schema`                         | —                     | (global)                                 |
-| `ateapi.postgres.serverCAFile`               | `ATE_API_POSTGRES_SERVER_CA_FILE`               | `--ateapi-postgres-server-ca-file`                 | —                     | (global)                                 |
-| `ateapi.postgres.storageClass`               | `ATE_API_POSTGRES_STORAGE_CLASS`                | `--ateapi-postgres-storage-class`                  | —                     | (global)                                 |
-| `atenet.dataplane`                           | `ATE_ATENET_DATAPLANE`                          | `--atenet-dataplane`                               | `envoy`               | (global)                                 |
-| `atenet.egress.additionalExtprocService`     | `ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE`         | `--experimental-additional-egress-extproc-service` | —                     | (global)                                 |
-| `atenet.egress.credentialProvider`           | `ATE_CREDENTIAL_PROVIDER`                       | `--credential-provider`                            | —                     | (global)                                 |
-| `benchmark.actorMemory`                      | `BENCHMARK_ACTOR_MEMORY`                        | `--benchmark-actor-memory`                         | —                     | (global)                                 |
-| `benchmark.sandboxClass`                     | `ATE_BENCHMARK_SANDBOX_CLASS`                   | `--sandbox-class`                                  | `gvisor`              | `deploy benchmarks`, `delete benchmarks` |
-| `benchmark.workerCount`                      | `ATE_BENCHMARK_WORKER_COUNT`                    | `--worker-count`                                   | `1`                   | `deploy benchmarks`, `delete benchmarks` |
-| `clusterSize`                                | `ATE_INSTALL_CLUSTER_SIZE`                      | `--cluster-size`                                   | `size0`               | (global)                                 |
-| `context`                                    | `KUBECTL_CONTEXT`                               | `--context`                                        | —                     | (global)                                 |
-| `cordonControlPlane`                         | `ATE_INSTALL_CORDON_CONTROL_PLANE`              | `--cordon-control-plane`                           | `false`               | (global)                                 |
-| `csi.setup`                                  | `SETUP_CSI`                                     | `--setup-csi`                                      | `none`                | `deploy ate-system`                      |
-| `demo.anthropicAPIKey`                       | `ANTHROPIC_API_KEY`                             | — (no flag)                                        | — (secret)            | (global)                                 |
-| `demo.counter.storageClass`                  | `STORAGE_CLASS`                                 | `--storage-class`                                  | `standard`            | `deploy demo counter`                    |
-| `demo.counter.withExternalVolume`            | `ATE_DEMO_COUNTER_WITH_EXTERNAL_VOLUME`         | `--with-external-volume`                           | `false`               | `deploy demo counter`                    |
-| `docker.buildFlags`                          | `DOCKER_BUILD_FLAGS`                            | `--docker-build-flags`                             | —                     | (global)                                 |
-| `gcp.clusterLocation`                        | `CLUSTER_LOCATION`                              | `--gcp-cluster-location`                           | —                     | (global)                                 |
-| `gcp.clusterName`                            | `CLUSTER_NAME`                                  | `--gcp-cluster-name`                               | —                     | (global)                                 |
-| `gcp.projectID`                              | `PROJECT_ID`                                    | `--gcp-project-id`                                 | —                     | (global)                                 |
-| `images.repo`                                | `ATE_IMAGE_REPO`                                | `--image-repo`                                     | —                     | (global)                                 |
-| `images.tag`                                 | `ATE_IMAGE_TAG`                                 | `--image-tag`                                      | —                     | (global)                                 |
-| `kindCluster.enabled`                        | `ATE_INSTALL_KIND`                              | `--kind`                                           | `false`               | (global)                                 |
-| `kindCluster.name`                           | `KIND_CLUSTER_NAME`                             | `--kind-cluster-name`                              | `kind`                | (global)                                 |
-| `ko.defaultPlatforms`                        | `KO_DEFAULTPLATFORMS`                           | `--ko-default-platforms`                           | —                     | (global)                                 |
-| `ko.dockerRepo`                              | `KO_DOCKER_REPO`                                | `--ko-docker-repo`                                 | —                     | (global)                                 |
-| `kubeconfig`                                 | `KUBECONFIG`                                    | `--kubeconfig`                                     | —                     | (global)                                 |
-| `namespace`                                  | `ATE_NAMESPACE`                                 | `--namespace`                                      | `ate-system`          | (global)                                 |
-| `otlpEndpoint`                               | `ATE_OTLP_ENDPOINT`                             | `--otlp-endpoint`                                  | —                     | (global)                                 |
-| `podcert.workersPerSigner`                   | `ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER`        | `--podcert-workers-per-signer`                     | `0`                   | (global)                                 |
-| `record.dir`                                 | `ATE_RECORD_DIR`                                | `--record-dir`                                     | —                     | (global)                                 |
-| `rolloutTimeout`                             | `ATE_INSTALL_ROLLOUT_TIMEOUT`                   | `--rollout-timeout`                                | `1m0s`                | (global)                                 |
-| `storage.bucketName`                         | `BUCKET_NAME`                                   | `--storage-bucket-name`                            | —                     | (global)                                 |
+| `actorJWT.algorithm` | — | `--actor-jwt-algorithm` | `ES256` | (global) |
+| `actorJWT.issuer` | — | `--actor-jwt-issuer` | — | (global) |
+| `ateapi.expectedJWTIssuer` | — | `--ateapi-expected-jwt-issuer` | — | (global) |
+| `ateapi.postgres.cloudsql.gsa` | — | `--ateapi-postgres-cloudsql-gsa` | — | (global) |
+| `ateapi.postgres.cloudsql.iamAuth` | — | `--ateapi-postgres-cloudsql-iam-auth` | — | (global) |
+| `ateapi.postgres.cloudsql.instance` | — | `--ateapi-postgres-cloudsql-instance` | — | (global) |
+| `ateapi.postgres.cloudsql.ipType` | — | `--ateapi-postgres-cloudsql-ip-type` | — | (global) |
+| `ateapi.postgres.owner.connectionString` | `ATE_API_POSTGRES_OWNER_CONNECTION_STRING` | — (no flag) | — (secret) | (global) |
+| `ateapi.postgres.owner.role` | — | `--ateapi-postgres-owner-role` | `substrate_owner` | (global) |
+| `ateapi.postgres.poolMaxConns` | — | `--ateapi-postgres-pool-max-conns` | — | (global) |
+| `ateapi.postgres.readWrite.connectionString` | `ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING` | — (no flag) | — (secret) | (global) |
+| `ateapi.postgres.readWrite.role` | — | `--ateapi-postgres-read-write-role` | `substrate_readwrite` | (global) |
+| `ateapi.postgres.schema` | — | `--ateapi-postgres-schema` | — | (global) |
+| `ateapi.postgres.serverCAFile` | — | `--ateapi-postgres-server-ca-file` | — | (global) |
+| `ateapi.postgres.storageClass` | — | `--ateapi-postgres-storage-class` | — | (global) |
+| `atenet.dataplane` | — | `--atenet-dataplane` | `envoy` | (global) |
+| `atenet.egress.additionalExtprocService` | — | `--experimental-additional-egress-extproc-service` | — | (global) |
+| `atenet.egress.credentialProvider` | — | `--credential-provider` | — | (global) |
+| `benchmark.actorMemory` | — | `--benchmark-actor-memory` | — | (global) |
+| `benchmark.sandboxClass` | — | `--sandbox-class` | `gvisor` | `deploy benchmarks`, `delete benchmarks` |
+| `benchmark.workerCount` | — | `--worker-count` | `1` | `deploy benchmarks`, `delete benchmarks` |
+| `clusterSize` | — | `--cluster-size` | `size0` | (global) |
+| `context` | — | `--context` | — | (global) |
+| `cordonControlPlane` | — | `--cordon-control-plane` | `false` | (global) |
+| `csi.setup` | — | `--setup-csi` | `none` | `deploy ate-system` |
+| `build.version` | — | `--build-version` | — | source builds only |
+| `demo.anthropicAPIKey` | `ANTHROPIC_API_KEY` | — (no flag) | — (secret) | (global) |
+| `demo.counter.storageClass` | — | `--storage-class` | `standard` | `deploy demo counter` |
+| `demo.counter.withExternalVolume` | — | `--with-external-volume` | `false` | `deploy demo counter` |
+| `docker.buildFlags` | — | `--docker-build-flags` | — | (global) |
+| `gcp.clusterLocation` | — | `--gcp-cluster-location` | — | (global) |
+| `gcp.clusterName` | — | `--gcp-cluster-name` | — | (global) |
+| `gcp.projectID` | — | `--gcp-project-id` | — | (global) |
+| `images.repo` | — | `--image-repo` | — | (global) |
+| `images.tag` | — | `--image-tag` | — | (global) |
+| `kindCluster.enabled` | — | `--kind` | `false` | (global) |
+| `kindCluster.name` | — | `--kind-cluster-name` | `kind` | (global) |
+| `ko.defaultPlatforms` | — | `--ko-default-platforms` | — | (global) |
+| `ko.dockerRepo` | — | `--ko-docker-repo` | — | (global) |
+| `kubeconfig` | `KUBECONFIG` (standard client-go convention) | `--kubeconfig` | — | (global) |
+| `namespace` | — | `--namespace` | `ate-system` | (global) |
+| `otlpEndpoint` | — | `--otlp-endpoint` | — | (global) |
+| `podcert.workersPerSigner` | — | `--podcert-workers-per-signer` | `0` | (global) |
+| `record.dir` | — | `--record-dir` | — | (global) |
+| `rolloutTimeout` | — | `--rollout-timeout` | `1m0s` | (global) |
+| `storage.bucketName` | — | `--storage-bucket-name` | — | (global) |
+Source builds use `build.version` / `--build-version` when supplied, otherwise
+the checkout version. Prebuilt installs derive the version from `--image-tag`;
+`--build-version` is rejected with `--image-repo`.
+
+Ambient `KUBECONFIG` follows client-go loading behavior. `--kubeconfig` or the
+file setting takes precedence.
 
 ## Secrets
 
-Credentials should come from the environment, not from a document that gets
-committed:
+The three secret inputs can come from the environment or the configuration
+file. The file overrides the environment, so protect any file containing a
+credential:
 
 ```bash
 export ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING='postgres://...'
@@ -323,7 +310,7 @@ ate-setup deploy ate-system --config substrate-install.yaml
 ```
 
 These settings have no flag. A command line is visible in `ps` to every user
-on the host and is written to shell history, so a credential is supplied
-through the environment or through a file you can permission.
+on the host and is written to shell history, so supply credentials through the
+environment or a file with restricted permissions.
 
 The run report prints `<set>` for these rather than the value.

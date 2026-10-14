@@ -5,8 +5,9 @@
 
 The port has replaced them. The demo scripts are deleted, and
 `hack/install-ate.sh` is a shim holding no install logic of its own: it
-translates the flags and environment variables the installer has always
-accepted onto `ate-setup` commands, so existing command lines keep working. See
+translates supported flags onto `ate-setup` commands. Installation settings
+come from defaults, a config file, or flags; only the three secret inputs remain
+environment-backed. See
 [`commands.md`](commands.md) for the flag-by-flag mapping.
 
 This document covers what changed *behind* that mapping: the design decisions
@@ -54,7 +55,7 @@ These were treated as contracts and reproduced exactly:
 | Actions per run | many, one per flag, in command-line order | exactly one subcommand |
 | Argument errors | detected when the dispatch loop reaches the flag, after earlier actions already ran | rejected by cobra before anything runs |
 | Value flags | pre-scanned so they could appear anywhere | positional, per-command, standard flag parsing |
-| Configuration | env vars (`ATE_INSTALL_KIND`, `ATE_ATENET_DATAPLANE`, `KUBECTL_CONTEXT`, …) | flags, with the env vars still honored as defaults |
+| Configuration | sourced shell environment | defaults, config file, then flags; only secret inputs retain environment support |
 | Repository root | `git rev-parse --show-toplevel`, then `cd` | walk up for `go.mod`; no `chdir`, all paths absolute |
 
 The one-action-per-run change is the most visible: a line that passed
@@ -69,9 +70,10 @@ an unknown driver is rejected during argument validation, before the
 configuration is even loaded, and `--setup-csi=hostpath` against a cluster that
 is not Kind is refused before `deploy ate-system` installs anything.
 
-`.ate-dev-env.sh` is still sourced through bash — a developer's file can contain
-arbitrary shell — but its variables are then layered under the process
-environment and the flags rather than being exported wholesale.
+The installer no longer sources `.ate-dev-env.sh`. Use `--config` for ordinary
+settings. Only read/write DSN, owner DSN, and Anthropic API key retain environment
+input; file values override them. Ambient `KUBECONFIG` follows client-go, with
+explicit file or flag values taking precedence.
 
 ## External binaries
 
@@ -84,10 +86,9 @@ Still required, and why:
 |---|---|
 | `ko` | building and publishing images (`ko resolve` only); not used with `--image-repo` |
 | `go` | locating the pinned `ko` tool, exactly as `hack/run-tool.sh` does; not used with `--image-repo` |
-| `git` | the `git describe` version stamp passed to ko; not used with `--image-repo` |
+| `git` | the `git describe` version stamp for source builds; not used with `--image-repo` |
 | `docker` | the kind CSI setup (`docker exec` into the node) and the claude-code-multiplex workload build |
-| `gcloud` | GKE `get-credentials`, only when `PROJECT_ID` is set and no context was given |
-| `bash` | sourcing `.ate-dev-env.sh` |
+| `gcloud` | GKE `get-credentials` when project and cluster parameters are configured and no context was given |
 
 Two shell scripts are still invoked rather than reimplemented, because they
 orchestrate image builds, asset assembly, and object-store staging that are out
@@ -130,8 +131,8 @@ that a tag moving afterwards cannot change what is running.
 That tag also becomes the substrate version, which names the atelet DaemonSet
 and sets the node label partitioning nodes across coexisting versions. It has
 to: that label must describe the atelet actually running, which came from the
-image, not the checkout `git describe` happens to be sitting on. `VERSION`
-overrides it, as it always has.
+image. Source builds use `--build-version` when supplied, otherwise the checkout
+version. Prebuilt installs reject `--build-version` overrides.
 
 The rewrite is textual, one token at a time, matching `SubstituteVersion` above.
 A reference is replaced wherever it appears, so the code needs no list of which
@@ -297,14 +298,14 @@ the only consequence is that the first `ate-setup` install over a
 shell-installed cluster rolls `ate-api-server` once.
 
 **Cloud SQL DSNs are synthesized, not adopted verbatim.** With
-`ATE_API_POSTGRES_CLOUDSQL_INSTANCE` set and no explicit
-`ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING`, the DSN is built passwordless
+`ateapi.postgres.cloudsql.instance` set in config or by flag and no explicit
+`ateapi.postgres.readWrite.connectionString`, the DSN is built passwordless
 against the proxy's loopback listener from the GSA's email
 ([`cloud-sql.md`](../../tools/setup-gcp/cloud-sql.md)), so
-`ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH=false` is rejected rather than producing a
+`ateapi.postgres.cloudsql.iamAuth=false` is rejected rather than producing a
 DSN that cannot authenticate. The owner connection uses the same IAM login
-unless `ATE_API_POSTGRES_OWNER_CONNECTION_STRING` is set. An *unset* instance variable is distinct from an
-exported empty one: unset adopts whatever the cluster already records in
+unless `ateapi.postgres.owner.connectionString` is set. An absent instance setting is distinct from an explicitly
+empty one: unset adopts whatever the cluster already records in
 `ate-api-server-envvars`, including the IP type and the GSA from the
 `iam.gke.io/gcp-service-account` annotation, so a redeploy from a shell that
 never exported the variables leaves a working proxy alone. Exporting it empty

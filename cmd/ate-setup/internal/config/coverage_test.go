@@ -42,23 +42,44 @@ var notFromASetting = map[string]bool{
 func TestEveryConfigFieldIsFedBySomeSetting(t *testing.T) {
 	// Give every setting a value of its kind, so a populated field cannot be
 	// zero by coincidence.
-	env := map[string]string{}
+	flags, env := map[string]string{}, map[string]string{}
 	for _, s := range All() {
+		// The fixture represents a source build so it can exercise build.version;
+		// Config.Images is checked separately as an assembled field.
+		if s.Key == "images.repo" || s.Key == "images.tag" {
+			continue
+		}
 		switch s.Kind {
 		case KindBool:
 			// A Kind install clears the GCP coordinates by design, so the
 			// cloud path is the one that exercises every field.
-			env[s.Env] = strconv.FormatBool(s.Key != "kindCluster.enabled")
+			if s.Secret {
+				env[s.Env] = strconv.FormatBool(s.Key != "kindCluster.enabled")
+			} else {
+				flags[s.Flag] = strconv.FormatBool(s.Key != "kindCluster.enabled")
+			}
 		case KindInt:
-			env[s.Env] = "7"
+			if s.Secret {
+				env[s.Env] = "7"
+			} else {
+				flags[s.Flag] = "7"
+			}
 		case KindDuration:
-			env[s.Env] = "7m0s"
+			if s.Secret {
+				env[s.Env] = "7m0s"
+			} else {
+				flags[s.Flag] = "7m0s"
+			}
 		default:
-			env[s.Env] = valueFor(s.Key)
+			if s.Secret {
+				env[s.Env] = valueFor(s.Key)
+			} else {
+				flags[s.Flag] = valueFor(s.Key)
+			}
 		}
 	}
 
-	r, err := Resolve(nil, ResolveOptions{Env: env})
+	r, err := Resolve(flagsWith(t, flags), ResolveOptions{Env: env})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}

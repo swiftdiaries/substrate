@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package config resolves the environment ate-setup installs into. It layers
-// the developer's .ate-dev-env.sh (sourced through bash, so existing setups
-// keep working), the ambient process environment, and command line flags into
-// a single typed Config.
+// Package config resolves the environment ate-setup installs into from
+// defaults, configuration files and command line flags.
 package config
 
 import (
@@ -67,41 +65,34 @@ const (
 	DefaultPostgresOwnerRole     = postgressetup.OwnerRole
 )
 
-// Cloud SQL Auth Proxy IP types, the values ATE_API_POSTGRES_CLOUDSQL_IP_TYPE
-// accepts.
+// Cloud SQL Auth Proxy IP types.
 const (
 	CloudSQLIPTypePrivate = "private"
 	CloudSQLIPTypePublic  = "public"
 	CloudSQLIPTypePSC     = "psc"
 )
 
-// devEnvFile is the optional per-developer environment script at the repo root.
-const devEnvFile = ".ate-dev-env.sh"
-
-// Config is the fully resolved installation environment. Fields sourced from
-// the developer environment keep their shell names in the comments so the
-// mapping back to .ate-dev-env.sh stays obvious.
+// Config is the fully resolved installation environment.
 type Config struct {
 	// Root is the repository root. All manifest paths are relative to it.
 	Root string
 
-	// Kind selects the local Kind install profile (ATE_INSTALL_KIND).
+	// Kind selects the local Kind install profile.
 	Kind bool
 
-	// Namespace is the namespace the control plane is installed into, from
-	// ATE_NAMESPACE. It defaults to the canonical installdefaults.SystemNamespace,
+	// Namespace is the namespace the control plane is installed into. It
+	// defaults to the canonical installdefaults.SystemNamespace,
 	// so an install that does not set it is unaffected. The checked-in manifests
 	// under manifests/ate-install/ name that namespace literally, so the
 	// manifest-applying steps refuse any other value; see Env.RequireCanonicalNamespace.
 	Namespace string
 
 	// Kubeconfig and Context select the target cluster. Empty Context means
-	// "use the current context" (the KUBECTL_CONTEXT convention).
+	// "use the current context".
 	//
-	// Kubeconfig is a single file, handed to client-go as its explicit path. It
-	// falls back to $KUBECONFIG rather than staying empty so that ate-setup and
-	// the shell scripts it delegates to agree on the cluster — but only when
-	// that variable names one file. See loadKubeconfig.
+	// Kubeconfig is the selected file or explicit path list handed to client-go.
+	// An ambient path list stays empty here so client-go uses its standard
+	// loading rules. See splitKubeconfig.
 	Kubeconfig string
 	Context    string
 
@@ -112,16 +103,16 @@ type Config struct {
 	ClusterLocation string
 
 	// ExpectedJWTIssuer is the service account token issuer ate-api-server
-	// trusts (EXPECTED_JWT_ISSUER). It overrides both the GKE derivation from
+	// trusts. It overrides both the GKE derivation from
 	// the coordinates above and OpenID discovery, for clusters whose issuer
 	// follows neither form.
 	ExpectedJWTIssuer string
 
 	// ActorJWTAlgorithm is the signing algorithm of the key in a new actor JWT
-	// pool (ACTOR_JWT_ALGORITHM): ES256 or RS256.
+	// pool: ES256 or RS256.
 	ActorJWTAlgorithm string
 
-	// ActorJWTIssuer is the iss claim of actor JWTs (ACTOR_JWT_ISSUER). It
+	// ActorJWTIssuer is the iss claim of actor JWTs. It
 	// defaults to the in-cluster URL of the install's ate-idp-server Service.
 	ActorJWTIssuer string
 
@@ -132,8 +123,10 @@ type Config struct {
 	KODockerRepo string
 	// KODefaultPlatforms constrains ko's build platforms.
 	KODefaultPlatforms string
+	// BuildVersion is the source-build version stamped into binaries and manifests.
+	BuildVersion string
 	// DockerBuildFlags are extra docker buildx build flags for the images ko
-	// cannot build (DOCKER_BUILD_FLAGS, whitespace-separated).
+	// cannot build, from docker.buildFlags.
 	DockerBuildFlags []string
 
 	// Images selects where container images come from. Its zero value builds
@@ -153,19 +146,19 @@ type Config struct {
 	// adopting an existing Cloud SQL installation.
 	PostgresReadWriteRoleSet bool
 	PostgresOwnerRoleSet     bool
-	// PostgresSchema is the PostgreSQL schema for the Substrate tables
-	// (ATE_API_POSTGRES_SCHEMA). Empty means DefaultPostgresSchema.
+	// PostgresSchema is the PostgreSQL schema for the Substrate tables. Empty
+	// means DefaultPostgresSchema.
 	PostgresSchema string
-	// PostgresPoolMaxConns sizes the apiserver's read/write pool
-	// (ATE_API_POSTGRES_POOL_MAX_CONNS). Empty leaves the DSN or pgxpool default.
+	// PostgresPoolMaxConns sizes the apiserver's read/write pool. Empty leaves
+	// the DSN or pgxpool default.
 	PostgresPoolMaxConns string
 	// PostgresServerCAFile is a local PEM file holding the server CA of an
-	// external PostgreSQL (ATE_API_POSTGRES_SERVER_CA_FILE). Its contents are
-	// published as the postgres-server-ca Secret, which ate-api-server mounts
+	// external PostgreSQL. Its contents are published as the postgres-server-ca
+	// Secret, which ate-api-server mounts
 	// at /run/postgres-server-ca/server-ca.pem for sslmode=verify-ca DSNs.
 	PostgresServerCAFile string
-	// PostgresStorageClass is the StorageClass of the bundled PostgreSQL volume
-	// (ATE_API_POSTGRES_STORAGE_CLASS). Empty leaves the cluster default.
+	// PostgresStorageClass is the StorageClass of the bundled PostgreSQL volume.
+	// Empty leaves the cluster default.
 	PostgresStorageClass string
 	// CloudSQL points the apiserver at a Cloud SQL instance through the Auth
 	// Proxy sidecar instead of a directly reachable PostgreSQL.
@@ -204,18 +197,15 @@ type Config struct {
 	// OtlpEndpoint is where the control plane ships telemetry
 	// (ATE_OTLP_ENDPOINT). Benchmark actors are pointed at it too.
 	OtlpEndpoint string
-	// BenchmarkActorMemory is the memory limit for benchmark actors
-	// (BENCHMARK_ACTOR_MEMORY). Empty leaves the workload default in place.
+	// BenchmarkActorMemory is the memory limit for benchmark actors. Empty
+	// leaves the workload default in place.
 	BenchmarkActorMemory string
 
-	// kubeconfigEnv is what ScriptEnv exports as $KUBECONFIG. Unlike Kubeconfig
-	// it may be a PATH-style list of files, which kubectl understands and
-	// client-go's explicit path does not.
+	// kubeconfigEnv is what ScriptEnv exports as $KUBECONFIG, including a
+	// selected path list that kubectl merges through its standard loading rules.
 	kubeconfigEnv string
 
-	// shellEnv is the process environment layered over .ate-dev-env.sh. It is
-	// kept so that the shell scripts ate-setup still shells out to see the same
-	// variables the shell installer would have exported to them.
+	// shellEnv is the process environment used by delegated helper scripts.
 	shellEnv map[string]string
 
 	// resolved is every setting with the channel that supplied it. Commands
@@ -254,7 +244,7 @@ func defaultsOnly() *Resolved {
 }
 
 // CloudSQLConfig is the operator's Cloud SQL intent, as expressed by the
-// ATE_API_POSTGRES_CLOUDSQL_* variables.
+// Cloud SQL Auth Proxy configuration.
 //
 // Every field is empty-means-unspecified except Instance, which is three-way:
 // a non-empty instance selects Cloud SQL, an explicitly empty one removes it,
@@ -265,8 +255,8 @@ func defaultsOnly() *Resolved {
 type CloudSQLConfig struct {
 	// Instance is the instance connection name, PROJECT:REGION:INSTANCE.
 	Instance string
-	// InstanceSet records whether ATE_API_POSTGRES_CLOUDSQL_INSTANCE was
-	// present in the environment at all, empty value included.
+	// InstanceSet records whether config or a flag explicitly set the instance,
+	// including an explicit empty value.
 	InstanceSet bool
 
 	// GSA is the Google service account the proxy authenticates as, and whose
@@ -288,10 +278,8 @@ const (
 )
 
 // validateExtprocService checks the service reference. It takes the resolved
-// value rather than the bare string so the error names the channel that
-// supplied it: the setting reaches a flag, an environment variable and a
-// configuration file, and naming only the flag sends a reader who used one of
-// the other two to the wrong place.
+// value rather than the bare string so the error names the supported channel
+// that supplied it.
 func validateExtprocService(v Value) error {
 	spec := v.Raw
 	parts := strings.Split(spec, "/")
@@ -357,26 +345,51 @@ func (c *Config) Path(parts ...string) string {
 	return filepath.Join(append([]string{c.Root}, parts...)...)
 }
 
-// kindUnsetVars are the GKE-specific variables the shell kind installer unset
-// before delegating, so that a developer who had already sourced
-// .ate-dev-env.sh into their shell did not end up pointing a local install at a
-// cloud project.
+// kindUnsetVars prevent cloud settings inherited by helper scripts from
+// redirecting a local Kind install.
 var kindUnsetVars = []string{
 	"GCE_REGION", "CLUSTER_LOCATION", "NETWORK", "SUBNETWORK",
 	"MEMORYSTORE_INSTANCE", "PROJECT_ID",
 }
 
-// ScriptEnv returns the environment for the shell scripts ate-setup still
-// delegates to (the benchmark and micro-VM helpers).
+var retiredInstallerNames = map[string]struct{}{
+	"ACTOR_JWT_ALGORITHM": {}, "ACTOR_JWT_ISSUER": {}, "ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE": {},
+	"ATE_API_POSTGRES_CLOUDSQL_GSA": {}, "ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH": {},
+	"ATE_API_POSTGRES_CLOUDSQL_INSTANCE": {}, "ATE_API_POSTGRES_CLOUDSQL_IP_TYPE": {},
+	"ATE_API_POSTGRES_OWNER_ROLE": {}, "ATE_API_POSTGRES_POOL_MAX_CONNS": {},
+	"ATE_API_POSTGRES_READ_WRITE_ROLE": {}, "ATE_API_POSTGRES_SCHEMA": {},
+	"ATE_API_POSTGRES_SERVER_CA_FILE": {}, "ATE_API_POSTGRES_STORAGE_CLASS": {},
+	"ATE_ATENET_DATAPLANE": {}, "ATE_CREDENTIAL_PROVIDER": {}, "ATE_IMAGE_REPO": {},
+	"ATE_IMAGE_TAG": {}, "ATE_INSTALL_CLUSTER_SIZE": {}, "ATE_INSTALL_CORDON_CONTROL_PLANE": {},
+	"ATE_INSTALL_KIND": {}, "ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER": {},
+	"ATE_INSTALL_ROLLOUT_TIMEOUT": {}, "ATE_NAMESPACE": {}, "ATE_OTLP_ENDPOINT": {},
+	"ATE_RECORD_DIR": {}, "ATE_BENCHMARK_ACTOR_MEMORY": {}, "ATE_BENCHMARK_RUNNER_CPU_COUNT": {},
+	"ATE_BENCHMARK_WORKER_COUNT": {}, "ATE_BENCHMARK_SANDBOX_CLASS": {},
+	"ATE_DEMO_COUNTER_WITH_EXTERNAL_VOLUME": {}, "BENCHMARK_ACTOR_MEMORY": {}, "BUCKET_NAME": {},
+	"CLUSTER_LOCATION": {}, "CLUSTER_NAME": {}, "DOCKER_BUILD_FLAGS": {},
+	"EXPECTED_JWT_ISSUER": {}, "KIND_CLUSTER_NAME": {}, "KO_DEFAULTPLATFORMS": {},
+	"KO_DOCKER_REPO": {}, "KUBECTL_CONTEXT": {}, "PROJECT_ID": {}, "SETUP_CSI": {},
+	"STORAGE_CLASS": {},
+	"VERSION":       {}, "ATE_CONFIG": {}, "ATE_NO_REPORT_DEFAULTS": {}, "NO_DEV_ENV": {},
+}
+
+// ScriptEnv returns the complete environment for the child tools ate-setup
+// invokes, with retired installer inputs removed and resolved values layered on top.
 //
 // Those scripts read the same variables the shell installer exported to them,
-// so this reproduces that environment: .ate-dev-env.sh under the process
-// environment, with the resolved configuration layered on top so that flags
-// such as --context and --kind reach them.
+// with resolved configuration layered on top so flags reach them.
 func (c *Config) ScriptEnv() []string {
 	merged := make(map[string]string, len(c.shellEnv)+len(kindUnsetVars)+12)
 	for k, v := range c.shellEnv {
 		merged[k] = v
+	}
+	for name := range retiredInstallerNames {
+		delete(merged, name)
+	}
+	for _, setting := range All() {
+		if setting.Secret {
+			delete(merged, setting.Env)
+		}
 	}
 
 	if c.Kind {
@@ -384,11 +397,13 @@ func (c *Config) ScriptEnv() []string {
 			delete(merged, name)
 		}
 		merged["ATE_INSTALL_KIND"] = "true"
-		merged["NO_DEV_ENV"] = "true"
+		// Otherwise the staging helper derives the name from the Kind context.
+		if namedExplicitly(c.Resolved(), "kindCluster.name") {
+			merged["KIND_CLUSTER_NAME"] = c.Resolved().String("kindCluster.name")
+		}
 	}
 
-	// The resolved values win: they already account for flags, the dev env,
-	// and the kind profile.
+	// The resolved values win over inherited helper-script settings.
 	for name, value := range map[string]string{
 		"KUBECTL_CONTEXT":     c.Context,
 		"KUBECONFIG":          c.kubeconfigEnv,
@@ -438,18 +453,6 @@ func (c *Config) ScriptEnv() []string {
 		env = append(env, k+"="+v)
 	}
 	sort.Strings(env)
-	return env
-}
-
-// KoEnv returns the environment overrides ko needs for this configuration.
-func (c *Config) KoEnv() []string {
-	var env []string
-	if c.KODockerRepo != "" {
-		env = append(env, "KO_DOCKER_REPO="+c.KODockerRepo)
-	}
-	if c.KODefaultPlatforms != "" {
-		env = append(env, "KO_DEFAULTPLATFORMS="+c.KODefaultPlatforms)
-	}
 	return env
 }
 
@@ -520,9 +523,7 @@ func (p CredentialProvider) ServerName() string {
 func (c *Config) CredentialProvider() (CredentialProvider, error) {
 	raw := c.CredentialProviderJSON
 	if raw == "" {
-		// Every channel is named, not just the flag: a provider set in the
-		// configuration document is the documented way to do it, and a reader
-		// told only about the flag goes looking in the wrong place.
+		// Name both supported channels so a reader knows where to set it.
 		return CredentialProvider{}, fmt.Errorf("a credential provider is required; set one of %s: %s",
 			channelsFor(credentialProviderKey), credentialProviderUsage)
 	}

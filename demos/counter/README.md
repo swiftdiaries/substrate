@@ -8,9 +8,9 @@ The demo uses two kinds of resources: the `WorkerPool` is a Kubernetes CRD, whil
 
 ## Prerequisites
 
-- A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}'`).
+- A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-ate-system --credential-provider='{"name":"k8s.io"}'`).
 - `ko` installed for building images.
-- A GCS bucket for storing snapshots (configured via `BUCKET_NAME` env var).
+- A GCS bucket for storing snapshots (configured as `storage.bucketName` in the install config).
 
 ## How to Run on Agent Substrate
 
@@ -19,20 +19,19 @@ The demo uses two kinds of resources: the `WorkerPool` is a Kubernetes CRD, whil
 > [!NOTE]
 > Do not manually edit `demos/counter/counter.yaml.tmpl` or
 > `demos/counter/counter-template.yaml.tmpl`. The installation script
-> automatically injects your `${BUCKET_NAME}` environment variable during
-> deployment.
+> injects the resolved storage bucket into the templates during deployment.
 
 Use the core installation script to build the image and deploy the demo to your cluster:
 
 ```bash
-./hack/install-ate.sh --deploy-demo-counter
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-demo-counter
 ```
 
 To enable validation of reading from an external volume (e.g.
 `/external-data/test.txt`), run:
 
 ```bash
-./hack/install-ate.sh --deploy-demo-counter-with-external-volume
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-demo-counter-with-external-volume
 ```
 
 This command will:
@@ -171,7 +170,7 @@ On a cluster that already has the micro-VM deps (`hack/install-microvm-deps.sh`)
 deploy directly instead:
 
 ```bash
-./hack/install-ate.sh --deploy-demo-counter-microvm
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-demo-counter-microvm
 ```
 
 Then create an actor (`--template counter-microvm`, in the
@@ -185,8 +184,8 @@ guest-memory snapshot survived the round trip.
 To remove the counter demo resources from your cluster, run:
 
 ```bash
-./hack/install-ate.sh --delete-demo-counter
-./hack/install-ate.sh --delete-demo-counter-microvm
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --delete-demo-counter
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --delete-demo-counter-microvm
 ```
 
 This deletes the actors created from the demo templates, the templates

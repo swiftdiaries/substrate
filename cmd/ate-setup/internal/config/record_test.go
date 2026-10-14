@@ -24,7 +24,29 @@ import (
 func resolvedWith(t *testing.T, env map[string]string) *Resolved {
 	t.Helper()
 	useFixtures(t)
-	r, err := Resolve(nil, ResolveOptions{Env: env})
+	flags := map[string]string{}
+	secrets := map[string]string{}
+	flagByEnv := map[string]string{
+		"FIXTURE_MODE": "fixture-mode", "FIXTURE_NAME": "fixture-name",
+		"FIXTURE_COUNT": "fixture-count", "FIXTURE_NESTED_DEEP_KEY": "fixture-nested-deep-key",
+	}
+	for name, value := range env {
+		secret := false
+		for _, s := range All() {
+			if s.Env == name && s.Secret {
+				secret = true
+				break
+			}
+		}
+		if secret {
+			secrets[name] = value
+		} else if name == "KUBECONFIG" {
+			t.Setenv(name, value)
+		} else if flag := flagByEnv[name]; flag != "" {
+			flags[flag] = value
+		}
+	}
+	r, err := Resolve(flagsWith(t, flags), ResolveOptions{Env: secrets})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -110,7 +132,7 @@ func TestRecordCanClearAStringThatHasADefault(t *testing.T) {
 		Default: "alpha", Usage: "a string",
 	})
 
-	r, err := Resolve(nil, ResolveOptions{Env: map[string]string{env: ""}})
+	r, err := Resolve(flagsWith(t, map[string]string{"scratch-str": ""}), ResolveOptions{})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -160,7 +182,6 @@ func TestRecordOmitsSettingsNobodySupplied(t *testing.T) {
 // A record may be committed to an operations repository, so a credential in
 // one is a credential in version control.
 func TestRecordNeverWritesASecret(t *testing.T) {
-	useFixtures(t)
 	env := map[string]string{}
 	var secrets []string
 	for _, s := range All() {

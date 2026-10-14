@@ -16,7 +16,7 @@ It allows you to run arbitrary commands in an sandboxed, isolated container (run
 
 - A k8s cluster with Agent Substrate installed.
 - `ko` installed for building images.
-- A GCS bucket for storing snapshots (configured in `demos/sandbox/sandbox-template.yaml.tmpl`).
+- A GCS bucket for storing snapshots (configured as `storage.bucketName` in the install config).
 - `kubectl-ate` CLI installed (can be installed via `go install ./cmd/kubectl-ate`).
 
 ## How to Run on Agent Substrate
@@ -24,12 +24,12 @@ It allows you to run arbitrary commands in an sandboxed, isolated container (run
 ### 1. Build and Deploy
 
 > [!NOTE]
-> Do not manually edit the `demos/sandbox/*.yaml.tmpl` manifests. The installation script automatically injects your `${BUCKET_NAME}` environment variable during deployment.
+> Do not manually edit the `demos/sandbox/*.yaml.tmpl` manifests. The installation script injects the resolved storage bucket during deployment.
 
 Use the core installation script to build the image and deploy the demo to your cluster:
 
 ```bash
-./hack/install-ate.sh --deploy-demo-sandbox
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-demo-sandbox
 ```
 
 This command will:
@@ -109,5 +109,5 @@ kubectl ate delete actor my-sandbox-1 -a ate-demo-sandbox
 To remove the sandbox demo resources (actors, template, atespace, workerpool, and namespace) from your cluster, run:
 
 ```bash
-./hack/install-ate.sh --delete-demo-sandbox
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --delete-demo-sandbox
 ```

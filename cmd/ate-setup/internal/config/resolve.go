@@ -31,9 +31,8 @@ const (
 	OriginEnv
 	OriginFile
 	OriginFlag
-	// OriginKindProfile is a value a Kind install derived for itself because
-	// no channel supplied one. It is not a channel an operator writes to: the
-	// way to override it is any of the three above.
+	// OriginKindProfile is a value a Kind install derived when no explicit
+	// input supplied one.
 	OriginKindProfile
 )
 
@@ -90,17 +89,16 @@ type ResolveOptions struct {
 	// File is the parsed configuration document, or nil when --config was not
 	// given.
 	File *File
-	// Env is the environment to read, normally Environ().
+	// Env supplies the three secret settings that remain environment inputs.
 	Env map[string]string
 }
 
 // Resolve layers the channels in precedence order, lowest to highest:
 //
-//	environment < file < flag
+//	default < environment (secrets only) < file < flag
 //
-// A channel that does not carry a setting leaves the lower layer in place. The
-// file outranking the environment is deliberate: the file is the artifact an
-// operator owns and reviews, so ambient state must not silently outrank it.
+// Ordinary settings come from a file or flag. Environment values are read
+// only for secrets, and a file still overrides them.
 func Resolve(fs *pflag.FlagSet, opts ResolveOptions) (*Resolved, error) {
 	all := All()
 	r := &Resolved{values: make(map[string]Value, len(all))}
@@ -108,8 +106,10 @@ func Resolve(fs *pflag.FlagSet, opts ResolveOptions) (*Resolved, error) {
 	for _, s := range all {
 		v := Value{Setting: s, Raw: s.Default, From: OriginDefault}
 
-		if raw, ok := opts.Env[s.Env]; ok {
-			v = Value{Setting: s, Raw: raw, From: OriginEnv, Supplied: true}
+		if s.Secret {
+			if raw, ok := opts.Env[s.Env]; ok {
+				v = Value{Setting: s, Raw: raw, From: OriginEnv, Supplied: true}
+			}
 		}
 		if opts.File != nil {
 			if raw, ok := opts.File.Get(s.Key); ok {

@@ -69,7 +69,7 @@ func (e *Env) PublishWorkerImages(ctx context.Context, w io.Writer) error {
 // built from a Dockerfile.
 func (e *Env) PublishReleaseImages(ctx context.Context, w io.Writer) error {
 	if e.Cfg.KODockerRepo == "" {
-		return fmt.Errorf("publishing release images needs a registry to push to; set KO_DOCKER_REPO or --ko-docker-repo")
+		return fmt.Errorf("publishing release images needs a registry to push to; set --ko-docker-repo or ko.dockerRepo in --config")
 	}
 	tag, _, err := e.SubstrateVersion()
 	if err != nil {

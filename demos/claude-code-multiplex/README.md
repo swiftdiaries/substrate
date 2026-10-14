@@ -35,7 +35,7 @@ This guide assumes you know Kubernetes and the general shape of agent runtimes (
   ```
 - An **Anthropic API key** (the agents call Claude).
 - A GCS bucket for substrate state snapshots (configured during Substrate install).
-- `KO_DOCKER_REPO` set to a registry you can push to (e.g. `gcr.io/${PROJECT_ID}/ate-images`, same as `hack/ate-dev-env.sh.example`). The deploy step builds and pushes the workload image there with a sha256-pinned reference.
+- An image registry you can push to, supplied with `--ko-docker-repo` or `ko.dockerRepo` in `--config`. The deploy step builds and pushes the workload image there with a sha256-pinned reference.
 - `docker buildx` (the deploy function builds the workload image — a Dockerfile-based Python + Claude Code wrapper, not a Go binary, so `ko` doesn't apply for the workload itself).
 
 ## Components
@@ -52,15 +52,16 @@ This guide assumes you know Kubernetes and the general shape of agent runtimes (
 
 ### 1. Deploy the demo
 
-From the repo root, with your Anthropic key and substrate bucket name in the environment:
+From the repo root, with your Anthropic key in the environment and the bucket and registry passed explicitly:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... \
-BUCKET_NAME=your-substrate-bucket \
-  ./hack/install-ate.sh --deploy-demo-claude-code-multiplex
+  ./hack/install-ate.sh --deploy-demo-claude-code-multiplex \
+    --storage-bucket-name=your-substrate-bucket \
+    --ko-docker-repo=registry.example.com/your-project/ate-images
 ```
 
-This creates the `claude-multiplex-demo` namespace and its 2-pod `WorkerPool`, then the `claude-multiplex-demo` atespace and three actor templates in it named `agent-luna`, `agent-mars`, `agent-orion`, and waits for each template's golden snapshot. Under the hood, the deploy function builds the workload image with `docker buildx`, pushes it to `${KO_DOCKER_REPO}/claude-multiplex-demo-workload`, resolves the pushed sha256 digest, and substitutes the digest-pinned reference plus `ANTHROPIC_API_KEY` and `BUCKET_NAME` into the agent templates at apply time.
+This creates the `claude-multiplex-demo` namespace and its 2-pod `WorkerPool`, then the `claude-multiplex-demo` atespace and three actor templates in it named `agent-luna`, `agent-mars`, `agent-orion`, and waits for each template's golden snapshot. The deploy function builds the workload image with `docker buildx`, pushes it to the configured registry as `claude-multiplex-demo-workload`, resolves the pushed sha256 digest, and substitutes the digest-pinned reference, API key, and configured bucket into the agent templates at apply time.
 
 ### 2. Start the dashboard
 

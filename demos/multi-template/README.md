@@ -9,9 +9,9 @@ or namespace.
 
 ## Prerequisites
 
-- A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}'`).
+- A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-ate-system --credential-provider='{"name":"k8s.io"}'`).
 - `ko` installed for building images.
-- A GCS bucket for storing snapshots (configured via `BUCKET_NAME` env var).
+- A GCS bucket for storing snapshots (configured as `storage.bucketName` in the install config).
 
 ## How to Run on Agent Substrate
 
@@ -19,11 +19,10 @@ or namespace.
 
 > [!NOTE]
 > Do not manually edit the `demos/multi-template/*.yaml.tmpl` manifests. The
-> installation script automatically injects your `${BUCKET_NAME}` environment
-> variable during deployment.
+> installation script injects the resolved storage bucket during deployment.
 
 ```bash
-./hack/install-ate.sh --deploy-demo-multi-template
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-demo-multi-template
 ```
 
 This command will:
@@ -99,5 +98,5 @@ Remove the demo — this deletes the actors (suspending running ones first), the
 templates, both atespaces, and then the pool and its namespace:
 
 ```bash
-./hack/install-ate.sh --delete-demo-multi-template
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --delete-demo-multi-template
 ```

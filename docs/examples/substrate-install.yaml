@@ -16,10 +16,11 @@
 # An Agent Substrate installation, as a document an operator owns.
 #
 #   ate-setup deploy ate-system --config substrate-install.yaml
-#   ATE_CONFIG=substrate-install.yaml hack/install-ate.sh --deploy-ate-system
+#   hack/install-ate.sh --config substrate-install.yaml --deploy-ate-system
 #
-# Every setting here can equally be an environment variable or a flag; see
-# docs/operator-install.md for the full list and the precedence between them.
+# Ordinary settings can also be supplied as flags. Only the read/write DSN,
+# owner DSN, and Anthropic API key accept environment input; see
+# docs/operator-install.md for the full precedence and supported channels.
 # Keys not named below keep their declared default, which `ate-setup --help`
 # prints. A key named with an empty value is set to empty, not left at its
 # default -- that is how a setting is cleared.

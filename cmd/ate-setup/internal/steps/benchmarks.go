@@ -123,7 +123,7 @@ func (e *Env) DeleteBenchmarks(ctx context.Context, opts BenchmarkOptions) error
 func (e *Env) runScript(ctx context.Context, relPath string, args ...string) error {
 	cmd := exec.CommandContext(ctx, e.Cfg.Path(relPath), args...)
 	cmd.Dir = e.Cfg.Root
-	cmd.Env = e.Cfg.ScriptEnv()
+	cmd.Env = append(e.Cfg.ScriptEnv(), "NO_DEV_ENV=1")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin

@@ -55,16 +55,15 @@ This installs the CRDs and RBAC, the podcertificate controller and the secrets
 it signs, PostgreSQL, ate-api-server, ate-controller, the atenet dataplane, and
 the atelet DaemonSet, then waits for each to roll out.
 
-The bundled PostgreSQL StatefulSet is skipped when
-ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING or the ATE_API_POSTGRES_CLOUDSQL_* variables
-select an external database.
+The bundled PostgreSQL StatefulSet is skipped when a PostgreSQL DSN is supplied
+or ateapi.postgres.cloudsql.instance (via --config or its flags) selects Cloud SQL.
 
 Shape the install with the global --atenet-dataplane, --cluster-size, and
 --cordon-control-plane flags.`,
 	// Args runs before the root command loads the configuration, so only the
 	// flag is readable here. Checking it keeps an unusable value from costing
-	// a credential fetch, which is the common case; a value arriving from the
-	// environment or a configuration file is checked in RunE instead, where
+	// a credential fetch, which is the common case; a value arriving from a
+	// configuration file is checked in RunE instead, where
 	// the resolved settings exist.
 	Args: func(cmd *cobra.Command, args []string) error {
 		if err := cobra.NoArgs(cmd, args); err != nil {
@@ -150,9 +149,8 @@ var deployPostgresCmd = &cobra.Command{
 	Short: "Deploy the single-replica PostgreSQL StatefulSet",
 	Long: `Deploy the experimental single-replica PostgreSQL StatefulSet on its own.
 
-"deploy ate-system" already brings PostgreSQL up, unless
-ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING or the ATE_API_POSTGRES_CLOUDSQL_* variables
-select an external database; this subcommand is for bringing the StatefulSet up
+"deploy ate-system" already brings PostgreSQL up, unless a PostgreSQL DSN or
+ateapi.postgres.cloudsql.instance (via --config or its flags) selects an external database; this subcommand is for bringing the StatefulSet up
 by itself.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -174,7 +172,7 @@ func init() {
 	)
 
 	config.RegisterCommand(config.Setting{
-		Key: "csi.setup", Env: "SETUP_CSI", Flag: "setup-csi",
+		Key: "csi.setup", Flag: "setup-csi",
 		Kind: config.KindString, Default: "none",
 		Commands: []string{deployAteSystemPath},
 		Usage:    "Also install CSI driver (nfs, hostpath, both, none; default: none)",

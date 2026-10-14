@@ -33,7 +33,7 @@ func main() {
 	}
 	raw := os.Args[1]
 	if v := versionlabel.Value(raw); v != raw {
-		fmt.Fprintf(os.Stderr, "error: build version %q is not a valid label value (it would sanitize to %q); pin a label-safe one with VERSION=...\n", raw, v)
+		fmt.Fprintf(os.Stderr, "error: build version %q is not a valid label value (it would sanitize to %q); pin a label-safe one with --build-version\n", raw, v)
 		os.Exit(1)
 	}
 	fmt.Printf("%s %s\n", raw, versionlabel.NameSuffix(raw))

@@ -8,8 +8,11 @@ go build -o bin/ate-setup ./cmd/ate-setup
 ```
 
 `ate-setup` is the installer. `hack/install-ate.sh` is a shim over it, kept so
-that existing command lines and CI jobs keep working; it holds no install logic
-of its own.
+that existing flag-based command lines and CI jobs can use; it holds no install
+logic of its own. Ordinary settings resolve as `default < --config file < flag`.
+Only the read/write DSN, owner DSN, and Anthropic API key accept environment
+input, with file values taking precedence. `KUBECONFIG` follows client-go
+behavior unless an explicit kubeconfig setting is provided.
 
 ## Installing a release
 

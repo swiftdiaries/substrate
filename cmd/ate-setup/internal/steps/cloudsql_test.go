@@ -180,13 +180,13 @@ func TestCloudSQLDSN(t *testing.T) {
 	// startup rather than here.
 	t.Run("IAM auth disabled", func(t *testing.T) {
 		_, err := cloudSQLDSN(cloudSQLSettings{Instance: "p:r:i", GSA: "ate@p.iam.gserviceaccount.com", IAMAuth: "false"})
-		if err == nil || !strings.Contains(err.Error(), "ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH=false") {
+		if err == nil || !strings.Contains(err.Error(), "ateapi.postgres.cloudsql.iamAuth=false") {
 			t.Errorf("cloudSQLDSN() error = %v, want it to name the disabled IAM auth", err)
 		}
 	})
 	t.Run("no GSA", func(t *testing.T) {
 		_, err := cloudSQLDSN(cloudSQLSettings{Instance: "p:r:i", IAMAuth: "true"})
-		if err == nil || !strings.Contains(err.Error(), "ATE_API_POSTGRES_CLOUDSQL_GSA") {
+		if err == nil || !strings.Contains(err.Error(), "ateapi.postgres.cloudsql.gsa") {
 			t.Errorf("cloudSQLDSN() error = %v, want it to name the missing GSA", err)
 		}
 	})

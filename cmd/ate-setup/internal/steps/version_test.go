@@ -25,7 +25,7 @@ import (
 // Root points at a directory that is not a checkout, so `git describe` has
 // nothing to say and only the image tag can supply it.
 func TestSubstrateVersionPrebuilt(t *testing.T) {
-	t.Setenv("VERSION", "")
+	t.Setenv("VERSION", "hostile-ambient-version")
 
 	cases := []struct {
 		name       string
@@ -60,6 +60,29 @@ func TestSubstrateVersionPrebuilt(t *testing.T) {
 				t.Fatalf("SubstrateVersion = %q, %q; want %q, %q", got, suffix, tc.want, tc.wantSuffix)
 			}
 		})
+	}
+}
+
+func TestSubstrateVersionConfiguredSource(t *testing.T) {
+	t.Setenv("VERSION", "hostile-ambient-version")
+	e := &Env{Cfg: &config.Config{Root: t.TempDir(), BuildVersion: "v1.2.3"}}
+	got, suffix, err := e.SubstrateVersion()
+	if err != nil {
+		t.Fatalf("SubstrateVersion: %v", err)
+	}
+	if got != "v1.2.3" || suffix != "v1-2-3" {
+		t.Fatalf("SubstrateVersion = %q, %q; want v1.2.3, v1-2-3", got, suffix)
+	}
+}
+
+func TestSubstrateVersionRejectsConfiguredVersionForPrebuiltImages(t *testing.T) {
+	e := &Env{Cfg: &config.Config{
+		Root:         t.TempDir(),
+		Images:       images.Source{Repo: "example.com/substrate", Tag: "v1.2.3"},
+		BuildVersion: "v9.9.9",
+	}}
+	if _, _, err := e.SubstrateVersion(); err == nil {
+		t.Fatal("SubstrateVersion() succeeded with --build-version and --image-repo")
 	}
 }
 

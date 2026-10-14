@@ -13,9 +13,9 @@ See [docs/request-parking.md](../../docs/request-parking.md) for the design.
 
 ## Prerequisites
 
-- A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}'`).
+- A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-ate-system --credential-provider='{"name":"k8s.io"}'`).
 - `ko` installed for building images.
-- A GCS bucket for storing snapshots (configured via `BUCKET_NAME` env var).
+- A GCS bucket for storing snapshots (configured as `storage.bucketName` in the install config).
 
 ## How to Run on Agent Substrate
 
@@ -23,11 +23,10 @@ See [docs/request-parking.md](../../docs/request-parking.md) for the design.
 
 > [!NOTE]
 > Do not manually edit the `demos/parking/*.yaml.tmpl` manifests. The installation
-> script automatically injects your `${BUCKET_NAME}` environment variable during
-> deployment.
+> script injects the resolved storage bucket during deployment.
 
 ```bash
-./hack/install-ate.sh --deploy-demo-parking
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --deploy-demo-parking
 ```
 
 This command will:
@@ -166,5 +165,5 @@ Remove the demo — this deletes the demo's actors (suspending running ones
 first) and then the template, atespace, pool, and namespace:
 
 ```bash
-./hack/install-ate.sh --delete-demo-parking
+./hack/install-ate.sh --config=path/to/substrate-install.yaml --delete-demo-parking
 ```
