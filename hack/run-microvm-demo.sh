@@ -27,10 +27,8 @@
 #
 # Like the other hack scripts, this sources .ate-dev-env.sh for the cluster /
 # registry / bucket settings unless NO_DEV_ENV is set. The control plane deploy
-# requires a credential provider selection, which reaches it only through the
-# environment here: export ATE_CREDENTIAL_PROVIDER (e.g. '{"name":"k8s.io"}';
-# see hack/install-ate.sh --help) before running this, the kind wrapper
-# included.
+# requires a credential provider selection. Pass installer flags such as
+# --credential-provider='{"name":"k8s.io"}' after this script's name.
 #
 # Env (most come from .ate-dev-env.sh):
 #   KO_DOCKER_REPO   (required) image registry, e.g. gcr.io/PROJECT/ate-images for
@@ -59,10 +57,7 @@ KO_DOCKER_REPO="${KO_DOCKER_REPO:-}"
 KUBECTL_CONTEXT="${KUBECTL_CONTEXT:-}"
 BUCKET_NAME="${BUCKET_NAME:-ate-snapshots}"
 ATE_INSTALL_KIND="${ATE_INSTALL_KIND:-false}"
-if [[ $# -gt 0 ]]; then
-  echo "Error: unknown argument $1" >&2
-  exit 1
-fi
+ATE_SETUP_ARGS=("$@")
 
 if [[ -z "${KO_DOCKER_REPO}" ]]; then
   echo "Error: KO_DOCKER_REPO is required (set it in .ate-dev-env.sh for GKE," >&2
@@ -82,10 +77,9 @@ log() {
 log "Deploying the ate control plane (--deploy-ate-system)..."
 if [[ "${ATE_INSTALL_KIND}" == "true" ]]; then
   # install-ate-kind.sh sets NO_DEV_ENV/KO_DOCKER_REPO/ARCH/ATE_INSTALL_KIND itself.
-  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate-kind.sh --deploy-ate-system
+  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate-kind.sh "${ATE_SETUP_ARGS[@]}" --deploy-ate-system
 else
-  # GKE path: pass KO_DOCKER_REPO/BUCKET_NAME/KUBECTL_CONTEXT through the env.
-  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate.sh --deploy-ate-system
+  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate.sh "${ATE_SETUP_ARGS[@]}" --deploy-ate-system
 fi
 
 # --- 2. install micro-VM deps (assets + cluster-wide SandboxConfig) --------
@@ -105,9 +99,9 @@ fi
 # dispatch through install-ate.sh like step 1.
 log "Deploying the counter-microvm demo (--deploy-demo-counter-microvm)..."
 if [[ "${ATE_INSTALL_KIND}" == "true" ]]; then
-  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate-kind.sh --deploy-demo-counter-microvm
+  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate-kind.sh "${ATE_SETUP_ARGS[@]}" --deploy-demo-counter-microvm
 else
-  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate.sh --deploy-demo-counter-microvm
+  KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate.sh "${ATE_SETUP_ARGS[@]}" --deploy-demo-counter-microvm
 fi
 
 log "Demo applied. Next steps:"

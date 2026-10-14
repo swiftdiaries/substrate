@@ -152,11 +152,6 @@ jobs:
           ) }}
     env:
       E2E_ATENET_DATAPLANE: ${{ matrix.dataplane }}
-      # The installer requires a credential provider selection, and deploys the
-      # bundled Kubernetes Secrets provider with the control plane. Job-wide
-      # because every ate-setup invocation reads it, including the control
-      # plane redeploy in run-microvm-demo-kind.sh.
-      ATE_CREDENTIAL_PROVIDER: '{"name":"k8s.io"}'
       # E2E_JUNIT_FILE is set per step, not here: the lanes below share this
       # job, so one job-level path would have each overwrite the last.
       ARTIFACTS: ${{ github.workspace }}/_artifacts
@@ -227,31 +222,29 @@ jobs:
     - name: Install Agent Substrate (${{ matrix.dataplane }})
       # The dataplane selection applies to both the ingress router and egress
       # gateway.
-      run: hack/install-ate-kind.sh --deploy-ate-system --atenet-dataplane=${{ matrix.dataplane }}
+      run: hack/install-ate-kind.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}' --atenet-dataplane=${{ matrix.dataplane }} --docker-build-flags="${DOCKER_BUILD_FLAGS}"
     - name: Enable NFS
       # Load NFS kernel modules so in-cluster NFS server and CSI driver can run.
       run: |
         sudo modprobe nfs || true
         sudo modprobe nfsd || true
     - name: Install CSI NFS driver
-      run: hack/install-ate-kind.sh --setup-csi=nfs
+      run: hack/install-ate-kind.sh --setup-csi=nfs --credential-provider='{"name":"k8s.io"}' --atenet-dataplane=${{ matrix.dataplane }} --docker-build-flags="${DOCKER_BUILD_FLAGS}"
     - name: Deploy micro-VM counter demo
       # Stages the (cached) assets into the cluster's rustfs and deploys the
       # counter-microvm demo onto the control plane installed above. The demo
       # redeploys the control plane, so retain the selected dataplane.
-      env:
-        ATE_ATENET_DATAPLANE: ${{ matrix.dataplane }}
-      run: hack/run-microvm-demo-kind.sh
+      run: hack/run-microvm-demo-kind.sh --credential-provider='{"name":"k8s.io"}' --atenet-dataplane=${{ matrix.dataplane }} --docker-build-flags="${DOCKER_BUILD_FLAGS}"
     - name: Deploy gVisor counter demo
-      run: hack/install-ate-kind.sh --deploy-demo-counter
+      run: hack/install-ate-kind.sh --deploy-demo-counter --credential-provider='{"name":"k8s.io"}' --atenet-dataplane=${{ matrix.dataplane }} --docker-build-flags="${DOCKER_BUILD_FLAGS}"
     - name: Deploy egress demos
       # TestActorEgress in the networking suite builds its Actor from the egress
       # ActorTemplate for the class under test, so both fixtures have to exist
       # before their respective lane runs. The demo's actors trust the CA the
       # gateway mints its leaves from.
       run: |
-        hack/install-ate-kind.sh --deploy-demo-egress
-        hack/install-ate-kind.sh --deploy-demo-egress-microvm
+        hack/install-ate-kind.sh --deploy-demo-egress --credential-provider='{"name":"k8s.io"}' --atenet-dataplane=${{ matrix.dataplane }} --docker-build-flags="${DOCKER_BUILD_FLAGS}"
+        hack/install-ate-kind.sh --deploy-demo-egress-microvm --credential-provider='{"name":"k8s.io"}' --atenet-dataplane=${{ matrix.dataplane }} --docker-build-flags="${DOCKER_BUILD_FLAGS}"
     - name: Trust local TLS origins in egress gateway
       run: hack/setup-e2e-egress-tls-kind.sh
     # scale the idle sandbox class's demo pools to zero so each lane has the node

@@ -13,6 +13,7 @@ __pycache__/
 
 # Local environment variables
 .ate-dev-env.sh
+.ate-setup-config.yaml
 
 # Generated scratch directory for benchmark automation
 /benchmarking/automation/scratch/
