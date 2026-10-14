@@ -18,12 +18,6 @@ set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-# Standalone use keeps the developer environment; ate-setup supplies resolved
-# settings and sets NO_DEV_ENV so a stale dotfile cannot override them.
-if [[ -z "${NO_DEV_ENV:-}" && -f .ate-dev-env.sh ]]; then
-  source .ate-dev-env.sh
-fi
-
 # Ensure BUCKET_NAME is set
 if [[ -z "${BUCKET_NAME:-}" ]]; then
   echo "Error: BUCKET_NAME environment variable is not set." >&2
@@ -61,6 +55,8 @@ OTLP_ENDPOINT=""
 # The timeout, in whole seconds, for waiting for the ateom worker pods to be
 # ready.
 WAIT_TIMEOUT_SECS=300
+KUBECONFIG_FILE=""
+KUBE_CONTEXT=""
 
 usage() {
   echo "Usage: $0 [options]"
@@ -79,6 +75,8 @@ usage() {
   echo "                              sends telemetry (default: the endpoint in the"
   echo "                              ate-otel-config ConfigMap)"
   echo "  --wait-timeout SECONDS      The timeout in seconds for waiting for the ateom workers to be ready (default: 300)"
+  echo "  --kubeconfig FILE           Kubeconfig to use for cluster commands"
+  echo "  --context NAME              Kubernetes context to use for cluster commands"
   echo "  -h, --help                  Show this help message"
 }
 
@@ -95,7 +93,7 @@ resolve_otlp_endpoint() {
   if [[ -n "${OTLP_ENDPOINT}" ]]; then
     return 0
   fi
-  OTLP_ENDPOINT="$(kubectl get configmap ate-otel-config --namespace=ate-system \
+  OTLP_ENDPOINT="$(run_kubectl get configmap ate-otel-config --namespace=ate-system \
     -o jsonpath='{.data.OTEL_EXPORTER_OTLP_ENDPOINT}' 2>/dev/null || true)"
   if [[ -z "${OTLP_ENDPOINT}" ]]; then
     echo "Error: cannot read OTEL_EXPORTER_OTLP_ENDPOINT from the ate-otel-config" >&2
@@ -118,7 +116,11 @@ build_kubectl_ate() {
 }
 
 run_kubectl_ate() {
-  "${KUBECTL_ATE_BIN}" "$@"
+  "${KUBECTL_ATE_BIN}" "${KUBE_FLAGS[@]}" "$@"
+}
+
+run_kubectl() {
+  kubectl "${KUBE_FLAGS[@]}" "$@"
 }
 
 substitute() {
@@ -197,11 +199,11 @@ wait_templates_ready() {
 deploy() {
   resolve_otlp_endpoint
   echo "Deploying workloads (worker_count=${WORKER_COUNT}, actor_memory=${ACTOR_MEMORY}, worker_memory=${WORKER_MEMORY:-unset}, otlp_endpoint=${OTLP_ENDPOINT})..."
-  substitute "${POOL_MANIFEST}" | hack/run-tool.sh ko apply -f -
+  substitute "${POOL_MANIFEST}" | hack/run-tool.sh ko apply -f - ${KO_KUBE_FLAGS[@]+"${KO_KUBE_FLAGS[@]}"}
   echo "Waiting for worker pool to be ready (timeout: ${WAIT_TIMEOUT_SECS}s)..."
-  kubectl wait --for=create deployment/benchmark-ateom \
+  run_kubectl wait --for=create deployment/benchmark-ateom \
     --namespace=benchmark-workloads --timeout="${WAIT_TIMEOUT_SECS}s"
-  kubectl rollout status deployment/benchmark-ateom \
+  run_kubectl rollout status deployment/benchmark-ateom \
     --namespace=benchmark-workloads --timeout="${WAIT_TIMEOUT_SECS}s"
 
   # The store enforces that a template's atespace exists at create time.
@@ -238,7 +240,7 @@ delete() {
     || echo "atespace benchmark-workloads not deleted (may not exist or is not empty)"
   # The pool manifest contains ko:// image references; route through
   # `ko delete` so they get resolved before kubectl sees them.
-  substitute "${POOL_MANIFEST}" | hack/run-tool.sh ko delete --ignore-not-found -f -
+  substitute "${POOL_MANIFEST}" | hack/run-tool.sh ko delete --ignore-not-found -f - ${KO_KUBE_FLAGS[@]+"${KO_KUBE_FLAGS[@]}"}
 }
 
 if [[ "$#" -eq 0 ]]; then
@@ -247,6 +249,8 @@ if [[ "$#" -eq 0 ]]; then
 fi
 
 action=""
+KUBE_FLAGS=()
+KO_KUBE_FLAGS=()
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --deploy)
@@ -297,6 +301,20 @@ while [[ "$#" -gt 0 ]]; do
     --wait-timeout=*)
       WAIT_TIMEOUT_SECS="${1#*=}"
       ;;
+    --kubeconfig)
+      shift
+      KUBECONFIG_FILE="$1"
+      ;;
+    --kubeconfig=*)
+      KUBECONFIG_FILE="${1#*=}"
+      ;;
+    --context)
+      shift
+      KUBE_CONTEXT="$1"
+      ;;
+    --context=*)
+      KUBE_CONTEXT="${1#*=}"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -309,6 +327,10 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+[[ -z "${KUBECONFIG_FILE}" ]] || KUBE_FLAGS+=(--kubeconfig "${KUBECONFIG_FILE}")
+[[ -z "${KUBE_CONTEXT}" ]] || KUBE_FLAGS+=(--context "${KUBE_CONTEXT}")
+[[ ${#KUBE_FLAGS[@]} -eq 0 ]] || KO_KUBE_FLAGS=(-- "${KUBE_FLAGS[@]}")
 
 case "${SANDBOX_CLASS}" in
   gvisor|microvm) ;;

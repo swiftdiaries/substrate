@@ -19,12 +19,6 @@ set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-# Standalone use keeps the developer environment; ate-setup supplies resolved
-# settings and sets NO_DEV_ENV so a stale dotfile cannot override them.
-if [[ -z "${NO_DEV_ENV:-}" && -f .ate-dev-env.sh ]]; then
-  source .ate-dev-env.sh
-fi
-
 if [ -z "${PROJECT_ID:-}" ]; then
   echo "Error: PROJECT_ID environment variable must be set." >&2
   exit 1
@@ -41,6 +35,9 @@ BENCHMARK_USER_CLASS=glutton
 # --agentsession-script-file.
 AGENTSESSION_SCRIPT=""
 AGENTSESSION_SCRIPT_MOUNT=/etc/agentsession/script.yaml
+KUBECONFIG_FILE=""
+KUBE_CONTEXT=""
+KUBE_FLAGS=()
 
 usage() {
   echo "Usage: $0 [options]"
@@ -53,6 +50,12 @@ usage() {
   echo "                     Run this script YAML in the agentsession user class instead of a"
   echo "                     built-in variant. Validated locally, then mounted into the workers."
   echo "  -h|--help          Show this help message"
+  echo "  --kubeconfig FILE  Kubeconfig to use for cluster commands"
+  echo "  --context NAME     Kubernetes context to use for cluster commands"
+}
+
+run_kubectl() {
+  kubectl "${KUBE_FLAGS[@]}" "$@"
 }
 
 deploy() {
@@ -60,22 +63,22 @@ deploy() {
   # can scrape it when that stack is installed). Ensure it exists either way —
   # benchmarking/monitoring.yaml is otherwise optional.
   echo "Ensuring benchmarking namespace exists..."
-  kubectl create namespace benchmarking --dry-run=client -o yaml | kubectl apply -f -
+  run_kubectl create namespace benchmarking --dry-run=client -o yaml | run_kubectl apply -f -
   if [[ -n "${AGENTSESSION_SCRIPT}" ]]; then
     echo "Validating agent-session script ${AGENTSESSION_SCRIPT}..."
     (cd "${SCRIPT_DIR}/../.." && go run ./cmd/benchmarking/boomer-worker --check-agentsession-script "${AGENTSESSION_SCRIPT}")
     echo "Uploading it as the agentsession-script ConfigMap..."
-    kubectl -n benchmarking create configmap agentsession-script \
-      --from-file="script.yaml=${AGENTSESSION_SCRIPT}" --dry-run=client -o yaml | kubectl apply -f -
+    run_kubectl -n benchmarking create configmap agentsession-script \
+      --from-file="script.yaml=${AGENTSESSION_SCRIPT}" --dry-run=client -o yaml | run_kubectl apply -f -
   fi
   echo "Deploying Locust load (PROJECT_ID=${PROJECT_ID}, user_class=${BENCHMARK_USER_CLASS}, agentsession_script=${AGENTSESSION_SCRIPT:-<built-in>})..."
-  envsubst < "${MANIFEST}" | kubectl apply -f -
+  envsubst < "${MANIFEST}" | run_kubectl apply -f -
 }
 
 delete() {
   echo "Deleting Locust load..."
-  envsubst < "${MANIFEST}" | kubectl delete --ignore-not-found -f -
-  kubectl -n benchmarking delete configmap agentsession-script --ignore-not-found
+  envsubst < "${MANIFEST}" | run_kubectl delete --ignore-not-found -f -
+  run_kubectl -n benchmarking delete configmap agentsession-script --ignore-not-found
 }
 
 if [[ "$#" -eq 0 ]]; then
@@ -92,6 +95,10 @@ while [[ "$#" -gt 0 ]]; do
     --user-class=*) BENCHMARK_USER_CLASS="$(printf '%s' "${1#*=}" | tr '[:upper:]' '[:lower:]')" ;;
     --agentsession-script) shift; AGENTSESSION_SCRIPT="$1" ;;
     --agentsession-script=*) AGENTSESSION_SCRIPT="${1#*=}" ;;
+    --kubeconfig) shift; KUBECONFIG_FILE="$1" ;;
+    --kubeconfig=*) KUBECONFIG_FILE="${1#*=}" ;;
+    --context) shift; KUBE_CONTEXT="$1" ;;
+    --context=*) KUBE_CONTEXT="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Error: Unknown option: $1" >&2
@@ -101,6 +108,9 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+[[ -z "${KUBECONFIG_FILE}" ]] || KUBE_FLAGS+=(--kubeconfig "${KUBECONFIG_FILE}")
+[[ -z "${KUBE_CONTEXT}" ]] || KUBE_FLAGS+=(--context "${KUBE_CONTEXT}")
 
 if [[ ! -f "${SCRIPT_DIR}/tests/${BENCHMARK_USER_CLASS}.py" ]]; then
   echo "Error: no tests/${BENCHMARK_USER_CLASS}.py; --user-class must name a test file" >&2

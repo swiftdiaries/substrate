@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
@@ -53,30 +54,39 @@ func (o DeployOptions) Validate() error {
 	return ValidateCSIDriver(o.SetupCSI)
 }
 
-// DeployAteSystem installs the whole control plane: CRDs, RBAC, the
-// podcertificate controller, the store, ateapi, the controller, atenet, and
-// atelet.
-func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
-	log.Step("deploy_ate_system")
-
+// ValidateDeployAteSystem checks deployment settings and returns the selected
+// credential provider. It reads no cluster state and needs no clients.
+func (e *Env) ValidateDeployAteSystem(opts DeployOptions) (config.CredentialProvider, error) {
 	// This step applies the checked-in manifests, so it refuses a relocated
 	// namespace before creating anything.
 	if err := e.RequireCanonicalNamespace("deploy ate-system"); err != nil {
-		return err
+		return config.CredentialProvider{}, err
 	}
 	// Fail fast on an unusable build version or credential provider selection
 	// before touching the cluster.
 	if _, _, err := e.SubstrateVersion(); err != nil {
-		return err
+		return config.CredentialProvider{}, err
 	}
 	provider, err := e.Cfg.CredentialProvider()
 	if err != nil {
-		return err
+		return config.CredentialProvider{}, err
 	}
 	// Likewise the CSI request, even though it is only acted on partway
 	// through: a driver this cluster cannot run is worth knowing before the
 	// control plane goes up, not after.
 	if err := e.CheckCSIDriver(opts.SetupCSI); err != nil {
+		return config.CredentialProvider{}, err
+	}
+	return provider, nil
+}
+
+// DeployAteSystem installs the whole control plane: CRDs, RBAC, the
+// podcertificate controller, the store, ateapi, the controller, atenet, and
+// atelet.
+func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
+	log.Step("deploy_ate_system")
+	provider, err := e.ValidateDeployAteSystem(opts)
+	if err != nil {
 		return err
 	}
 

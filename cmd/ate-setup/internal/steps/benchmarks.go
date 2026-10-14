@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
@@ -71,11 +72,17 @@ func (e *Env) DeployBenchmarks(ctx context.Context, opts BenchmarkOptions) error
 	// `deploy ate-system`, which only installs gvisor-default. The workloads
 	// deploy references it by name and would fail if this were skipped.
 	if opts.SandboxClass == config.SandboxClassMicrovm {
-		if err := e.runScript(ctx, installMicrovmDepScript, "--install"); err != nil {
+		if err := e.SetupMicroVM(ctx); err != nil {
 			return err
 		}
 	}
-	return e.runScript(ctx, deployLocustScript, deployLocustArgs(opts, e.Cfg.OtlpEndpoint, e.Cfg.BenchmarkActorMemory)...)
+	return e.runScript(ctx, deployLocustScript, deployLocustArgs(opts, e.Cfg.OtlpEndpoint, e.Cfg.BenchmarkActorMemory, e.Cfg.Kubeconfig, e.Cfg.Context)...)
+}
+
+// SetupMicroVM stages runtime assets and installs the microvm SandboxConfig
+// using the same resolved target and storage settings as the control plane.
+func (e *Env) SetupMicroVM(ctx context.Context) error {
+	return e.runScript(ctx, installMicrovmDepScript, append([]string{"--install"}, kubeFlags(e.Cfg.Kubeconfig, e.Cfg.Context)...)...)
 }
 
 // deployLocustArgs builds the deploy_locust.sh argument list.
@@ -84,7 +91,7 @@ func (e *Env) DeployBenchmarks(ctx context.Context, opts BenchmarkOptions) error
 // have to be passed explicitly. Both trailing flags are omitted when unset:
 // deploy_locust.sh rejects an empty --otlp-endpoint outright, and an empty
 // --actor-memory would override the workload default with nothing.
-func deployLocustArgs(opts BenchmarkOptions, otlpEndpoint, actorMemory string) []string {
+func deployLocustArgs(opts BenchmarkOptions, otlpEndpoint, actorMemory, kubeconfig, kubeContext string) []string {
 	args := []string{
 		"--deploy",
 		"--worker-count", strconv.Itoa(opts.WorkerCount),
@@ -97,6 +104,10 @@ func deployLocustArgs(opts BenchmarkOptions, otlpEndpoint, actorMemory string) [
 	if actorMemory != "" {
 		args = append(args, "--actor-memory", actorMemory)
 	}
+	args = appendKubeconfigFlag(args, kubeconfig)
+	if kubeContext != "" {
+		args = append(args, "--context", kubeContext)
+	}
 	return args
 }
 
@@ -107,15 +118,30 @@ func (e *Env) DeleteBenchmarks(ctx context.Context, opts BenchmarkOptions) error
 	}
 	log.Stepf("delete_benchmarks (sandbox_class=%s)", opts.SandboxClass)
 
-	if err := e.runScript(ctx, deployLocustScript, "--delete"); err != nil {
+	if err := e.runScript(ctx, deployLocustScript, append([]string{"--delete"}, kubeFlags(e.Cfg.Kubeconfig, e.Cfg.Context)...)...); err != nil {
 		return err
 	}
 	// Only tear down the microvm SandboxConfig if the caller opted into
 	// microvm: it is cluster-wide and may be in use by something else.
 	if opts.SandboxClass == config.SandboxClassMicrovm {
-		return e.runScript(ctx, installMicrovmDepScript, "--delete")
+		return e.runScript(ctx, installMicrovmDepScript, append([]string{"--delete"}, kubeFlags(e.Cfg.Kubeconfig, e.Cfg.Context)...)...)
 	}
 	return nil
+}
+
+func kubeFlags(kubeconfig, kubeContext string) []string {
+	args := appendKubeconfigFlag(nil, kubeconfig)
+	if kubeContext != "" {
+		args = append(args, "--context", kubeContext)
+	}
+	return args
+}
+
+func appendKubeconfigFlag(args []string, kubeconfig string) []string {
+	if kubeconfig != "" && !strings.ContainsRune(kubeconfig, os.PathListSeparator) {
+		return append(args, "--kubeconfig", kubeconfig)
+	}
+	return args
 }
 
 // runScript executes a repository script from the repository root with the

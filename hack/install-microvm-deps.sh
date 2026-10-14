@@ -60,17 +60,20 @@ fi
 
 BUCKET_NAME="${BUCKET_NAME:-ate-snapshots}"
 KUBECTL_CONTEXT="${KUBECTL_CONTEXT:-}"
+KUBECONFIG_FILE=""
 ATE_INSTALL_KIND="${ATE_INSTALL_KIND:-false}"
 
 usage() {
   cat <<EOF
-Usage: $0 (--install | --delete)
+Usage: $0 (--install | --delete) [--kubeconfig FILE] [--context NAME]
 
 Options:
   --install   Assemble + stage micro-VM assets and apply the cluster-wide
               microvm SandboxConfig.
   --delete    Remove the microvm SandboxConfig from the cluster.
               (Bucket contents are left alone.)
+  --kubeconfig FILE  Kubeconfig file to use.
+  --context NAME     Kubernetes context to use.
   -h, --help  Show this message.
 EOF
 }
@@ -80,6 +83,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --install) action="install" ;;
     --delete)  action="delete"  ;;
+    --kubeconfig) shift; KUBECONFIG_FILE="$1" ;;
+    --kubeconfig=*) KUBECONFIG_FILE="${1#*=}" ;;
+    --context) shift; KUBECTL_CONTEXT="$1" ;;
+    --context=*) KUBECTL_CONTEXT="${1#*=}" ;;
     -h|--help) usage; exit 0    ;;
     *) echo "Error: unknown argument $1" >&2; usage; exit 1 ;;
   esac
@@ -95,7 +102,14 @@ fi
 # current-context is set, which surfaces mid-install as a confusing "connection
 # refused" from the apply -- after the assets have already been assembled and
 # staged. Resolve the target cluster up front instead.
-if [[ -z "${KUBECTL_CONTEXT}" ]] && ! kubectl config current-context >/dev/null 2>&1; then
+KUBE_FLAGS=()
+if [[ -n "${KUBECONFIG_FILE}" ]]; then
+  export KUBECONFIG="${KUBECONFIG_FILE}"
+  KUBE_FLAGS+=(--kubeconfig "${KUBECONFIG_FILE}")
+fi
+[[ -z "${KUBECTL_CONTEXT}" ]] || KUBE_FLAGS+=(--context "${KUBECTL_CONTEXT}")
+
+if [[ -z "${KUBECTL_CONTEXT}" ]] && ! kubectl "${KUBE_FLAGS[@]}" config current-context >/dev/null 2>&1; then
   echo "Error: no kube context to target: KUBECTL_CONTEXT is empty and the" >&2
   echo "       kubeconfig has no current-context." >&2
   echo "       Set KUBECTL_CONTEXT (e.g. in .ate-dev-env.sh) or run:" >&2
@@ -111,7 +125,7 @@ log() {
 }
 
 run_kubectl() {
-  kubectl ${KUBECTL_CONTEXT:+--context="${KUBECTL_CONTEXT}"} "$@"
+  kubectl "${KUBE_FLAGS[@]}" "$@"
 }
 
 MANIFEST_TEMPLATE="manifests/microvm/sandboxconfig-microvm.yaml.tmpl"

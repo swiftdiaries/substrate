@@ -34,6 +34,8 @@ ACTOR_MEMORY=""
 # Empty leaves the WorkerPool pods unsized.
 WORKER_MEMORY=""
 WAIT_TIMEOUT_SECS=""
+KUBECONFIG_FILE=""
+KUBE_CONTEXT=""
 
 usage() {
   echo "Usage: $0 [options]"
@@ -53,11 +55,13 @@ usage() {
   echo "  --wait-timeout SECONDS  Forwarded to workloads/deploy.sh. The timeout in seconds for"
   echo "                          waiting for the ateom workers to be ready (default: 300)"
   echo "  --skip-build            Skip locust image build/push (use the existing :latest image)"
+  echo "  --kubeconfig FILE       Kubeconfig to use throughout the deploy/delete chain"
+  echo "  --context NAME          Kubernetes context to use throughout the deploy/delete chain"
   echo "  -h|--help               Show this help message"
   echo ""
   echo "Environment:"
-  echo "  PROJECT_ID, BUCKET_NAME, etc. are read from .ate-dev-env.sh by the"
-  echo "  scripts this wrapper invokes."
+  echo "  PROJECT_ID, BUCKET_NAME, etc. must be present in the process environment."
+  echo "  Installer settings are passed as flags by ate-setup."
 }
 
 if [[ "$#" -eq 0 ]]; then
@@ -83,6 +87,10 @@ while [[ "$#" -gt 0 ]]; do
     --wait-timeout) shift; WAIT_TIMEOUT_SECS="$1" ;;
     --wait-timeout=*) WAIT_TIMEOUT_SECS="${1#*=}" ;;
     --skip-build) SKIP_BUILD=1 ;;
+    --kubeconfig) shift; KUBECONFIG_FILE="$1" ;;
+    --kubeconfig=*) KUBECONFIG_FILE="${1#*=}" ;;
+    --context) shift; KUBE_CONTEXT="$1" ;;
+    --context=*) KUBE_CONTEXT="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Error: Unknown option: $1" >&2
@@ -112,6 +120,8 @@ if [[ "${action}" == "deploy" ]]; then
   # which would overwrite the default in workloads/deploy.sh with an empty
   # string and send the actor telemetry nowhere.
   workload_args=(--deploy --worker-count "${WORKER_COUNT}" --sandbox-class "${SANDBOX_CLASS}")
+  [[ -z "${KUBECONFIG_FILE}" ]] || workload_args+=(--kubeconfig "${KUBECONFIG_FILE}")
+  [[ -z "${KUBE_CONTEXT}" ]] || workload_args+=(--context "${KUBE_CONTEXT}")
   if [[ -n "${OTLP_ENDPOINT}" ]]; then
     workload_args+=(--otlp-endpoint "${OTLP_ENDPOINT}")
   fi
@@ -137,14 +147,23 @@ if [[ "${action}" == "deploy" ]]; then
 
   echo
   echo "=== Deploying locust ==="
-  "${BENCHMARKING_DIR}/locust/deploy.sh" --deploy
+  locust_args=(--deploy)
+  [[ -z "${KUBECONFIG_FILE}" ]] || locust_args+=(--kubeconfig "${KUBECONFIG_FILE}")
+  [[ -z "${KUBE_CONTEXT}" ]] || locust_args+=(--context "${KUBE_CONTEXT}")
+  "${BENCHMARKING_DIR}/locust/deploy.sh" "${locust_args[@]}"
 elif [[ "${action}" == "delete" ]]; then
   echo "=== Deleting locust ==="
-  "${BENCHMARKING_DIR}/locust/deploy.sh" --delete
+  locust_args=(--delete)
+  [[ -z "${KUBECONFIG_FILE}" ]] || locust_args+=(--kubeconfig "${KUBECONFIG_FILE}")
+  [[ -z "${KUBE_CONTEXT}" ]] || locust_args+=(--context "${KUBE_CONTEXT}")
+  "${BENCHMARKING_DIR}/locust/deploy.sh" "${locust_args[@]}"
 
   echo
   echo "=== Deleting benchmark workloads ==="
-  "${BENCHMARKING_DIR}/workloads/deploy.sh" --delete
+  workload_args=(--delete)
+  [[ -z "${KUBECONFIG_FILE}" ]] || workload_args+=(--kubeconfig "${KUBECONFIG_FILE}")
+  [[ -z "${KUBE_CONTEXT}" ]] || workload_args+=(--context "${KUBE_CONTEXT}")
+  "${BENCHMARKING_DIR}/workloads/deploy.sh" "${workload_args[@]}"
 else
   usage
   exit 1

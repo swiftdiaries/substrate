@@ -286,6 +286,10 @@ func TestShimTranslatesFlags(t *testing.T) {
 			"setup csi nfs",
 		},
 	}, {
+		name: "setup microvm",
+		args: []string{"--setup-microvm"},
+		want: []string{"setup microvm"},
+	}, {
 		name: "a bare --setup-csi means nfs",
 		args: []string{"--setup-csi"},
 		want: []string{"setup csi nfs"},
@@ -500,6 +504,26 @@ func TestShimDoesNotOverrideSettingsFromConfig(t *testing.T) {
 	}, "\n")
 	if code != 0 || strings.Join(got, "\n") != want {
 		t.Fatalf("invocations = %q, exit = %d, want %q", got, code, want)
+	}
+}
+
+func TestShimValidationParsesOptionsWithoutRunningActions(t *testing.T) {
+	for _, driver := range [][]string{{"--setup-csi"}, {"--setup-csi", "hostpath"}} {
+		got, code := runShim(t, nil, append([]string{"--validate-config", "--context=requested", "--deploy-ate-system", "--delete-all"}, driver...)...)
+		wantDriver := "nfs"
+		if len(driver) > 1 {
+			wantDriver = driver[1]
+		}
+		want := goRunPrefix + "--context=requested --setup-csi=" + wantDriver + " validate"
+		if code != 0 || strings.Join(got, "\n") != want {
+			t.Errorf("validation invocations = %q, exit = %d, want %q", got, code, want)
+		}
+	}
+	for _, flag := range []string{"--contxt=requested", "--help"} {
+		got, code := runShim(t, nil, "--validate-config", "--delete-all", flag)
+		if code == 0 || len(got) != 0 {
+			t.Errorf("validation with %s ran %q, exit = %d; want rejection before any command", flag, got, code)
+		}
 	}
 }
 

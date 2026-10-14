@@ -1,7 +1,7 @@
 # `hack/install-ate.sh` after the move to `ate-setup`
 
 `hack/install-ate.sh` no longer installs anything. It is a translation shim: it
-parses supported flags and forwards explicit settings
+parses the flags and environment variables the installer has always accepted
 and runs `go run ./cmd/ate-setup <command>` for each action, in command-line
 order. [`commands.md`](commands.md) has the flag-by-flag mapping;
 [`differences.md`](differences.md) explains how the Go implementation differs
@@ -20,10 +20,10 @@ Deliberately, and covered by `shim_test.go`:
 - Every flag, with the same spelling, the same `=value` and separated-value
   forms, and the same "value flags may appear anywhere on the line" pre-scan.
 - Several actions per invocation, executed in the order they were written.
-- Explicit configuration and setting flags, including both `--config` forms.
-  Ordinary installation intent comes from defaults, the file, or flags. The
-  read/write DSN, owner DSN, and Anthropic API key remain environment inputs;
-  file values override them.
+- Every environment variable, including `SETUP_CSI`, `STORAGE_CLASS`,
+  `NO_DEV_ENV`, `ATE_INSTALL_KIND`, `KUBECTL_CONTEXT`, `PROJECT_ID`, and the
+  `ATE_API_POSTGRES_*` set. `ate-setup` reads them directly, so they need no
+  translation.
 - `--help` / `-h` anywhere on the line, no arguments at all (usage, exit 1),
   and an unrecognized flag (`Error: unknown option: …`, usage, exit 1) —
   including after earlier actions on the same line have already run.
@@ -100,13 +100,18 @@ podCertificate volume and cannot roll out without them, which is why
 `deploy_ate_system` had always called CSI setup from that point in its
 sequence; the standalone path just did not.
 
-### Configuration no longer comes from a developer shell file
+### `.ate-dev-env.sh` is layered, not sourced over you
 
-Ordinary installer settings resolve as `default < configuration file < flag`.
-The installer no longer sources `.ate-dev-env.sh`; `--no-dev-env`, `NO_DEV_ENV`,
-and `ATE_CONFIG` are removed. Use `--config` for a file. Ambient
-`KUBECONFIG` remains a standard client-go convention, and explicit kubeconfig
-settings take precedence.
+The script sourced the file into its own shell, so an `export FOO=...` in the
+file won over a `FOO` already exported in yours. `ate-setup` still runs the
+file through bash — it can contain arbitrary shell — but treats the result as
+the lowest-precedence layer: process environment first, then flags. If you
+have been relying on the file to override your shell, unset the variable in
+your shell instead.
+
+Sourcing is also skipped for Kind installs. `hack/install-ate-kind.sh` exports
+`NO_DEV_ENV`, so that path is unchanged, but running the shim yourself with
+`ATE_INSTALL_KIND=true` no longer reads the file.
 
 ### `--rollout-timeout` reaches further
 

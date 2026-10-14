@@ -53,7 +53,7 @@ from typing import Any
 import yaml
 
 from testtypes import TYPES
-from util import parse_duration_seconds, run, run_no_check
+from util import kube_flags, parse_duration_seconds, run, run_no_check
 
 
 SUBSTRATE_DIR = "/workspace/substrate"
@@ -64,6 +64,22 @@ MANIFESTS_DIR = "/opt/automation/manifests"
 NAMESPACE = "benchmarking"
 
 TEST_TYPES = tuple(TYPES)
+
+# ate-setup also drives tools that read these settings directly from the
+# environment. Keep their effective values in the target cache key.
+TARGET_ENV_KEYS = (
+    "PROJECT_ID",
+    "CLUSTER_NAME",
+    "CLUSTER_LOCATION",
+    "KO_DOCKER_REPO",
+    "KO_DEFAULTPLATFORMS",
+    "BUCKET_NAME",
+    "ATE_NAMESPACE",
+    "KUBECONFIG",
+    "KUBECTL_CONTEXT",
+    "ATE_INSTALL_KIND",
+    "KIND_CLUSTER_NAME",
+)
 
 ATE_CONFIG_ENV = {
     "PROJECT_ID": "gcp.projectID",
@@ -108,7 +124,6 @@ ATE_CONFIG_ENV = {
 # baseline before sourcing the next config (avoids stale vars carrying over
 # from a prior test if that test's config defined keys the next one doesn't).
 _ORIG_ENV = dict(os.environ)
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
@@ -158,19 +173,20 @@ def source_env(path: str) -> None:
 def apply_target_cluster(
     target_cluster: str, target_cluster_dir: str = TARGET_CLUSTER_DIR
 ) -> None:
-    """Copy target_cluster_dir/<name>.sh into the cloned
-    substrate repo as .ate-dev-env.sh (so install-ate.sh / deploy.sh source
-    it) and merge it into this process's env (so the orchestrator's own
-    gcloud / docker / kubectl calls see the same values). Resets os.environ
-    to the startup baseline first so vars defined by a previous target
-    cluster don't bleed into the next one."""
+    """Load one cluster's helper environment and generate ate-setup config.
+
+    The environment remains available to provisioning and benchmark tools;
+    ate-setup receives its settings from the generated config file. Reset the
+    process env first so prior targets and startup installer settings cannot
+    bleed into this one. Credentials and other tool/provisioning inputs remain.
+    """
     src = Path(target_cluster_dir) / f"{target_cluster}.sh"
     if not src.exists():
         raise FileNotFoundError(
             f"target cluster {target_cluster!r} not found at {src}"
         )
     os.environ.clear()
-    os.environ.update(_ORIG_ENV)
+    os.environ.update({name: value for name, value in _ORIG_ENV.items() if name not in ATE_CONFIG_ENV})
     dst = Path(SUBSTRATE_DIR) / ENV_FILE_NAME
     shutil.copy(src, dst)
     source_env(str(dst))
@@ -183,18 +199,21 @@ def apply_target_cluster(
 
 
 def write_ate_config() -> Path:
+    values = {
+        key: os.environ[name]
+        for name, key in ATE_CONFIG_ENV.items()
+        if os.environ.get(name) is not None
+    }
     config: dict[str, Any] = {
         "apiVersion": "install.ate.dev/v1alpha1",
         "kind": "SubstrateInstall",
     }
-    for name, dotted in ATE_CONFIG_ENV.items():
-        if name not in os.environ:
-            continue
+    for dotted, value in values.items():
         node = config
         parts = dotted.split(".")
         for part in parts[:-1]:
             node = node.setdefault(part, {})
-        node[parts[-1]] = os.environ[name]
+        node[parts[-1]] = value
     path = Path(SUBSTRATE_DIR) / ATE_CONFIG_FILE_NAME
     path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return path
@@ -238,6 +257,114 @@ def test_type(test: dict[str, Any]) -> str:
     return test["type"]
 
 
+def configure_kube_target(ate_args: Iterable[str]) -> list[str]:
+    """Resolve target overrides before cleanup, then pin every phase to them."""
+    ate_args = [str(a) for a in ate_args]
+    # Reject the complete configuration before any cleanup, using its Go parser.
+    run(["hack/install-ate.sh", "--validate-config", "--config", ATE_CONFIG_FILE_NAME, *ate_args])
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    for name in (
+        "config",
+        "context",
+        "kubeconfig",
+        "namespace",
+        "kind-cluster-name",
+        "gcp-project-id",
+        "gcp-cluster-name",
+        "gcp-cluster-location",
+        "ko-docker-repo",
+        "ko-default-platforms",
+        "storage-bucket-name",
+    ):
+        parser.add_argument("--" + name)
+    parser.add_argument("--kind", nargs="?", const="true")
+    options, _ = parser.parse_known_args(ate_args)
+    path = ATE_CONFIG_FILE_NAME if options.config is None else options.config
+    document: dict[str, str] = {}
+
+    # Match ate-setup's dotted keys and raw scalars: context 001 must stay 001.
+    def flatten(node, prefix=""):
+        if not isinstance(node, yaml.MappingNode):
+            raise ValueError("the installation configuration must be a mapping")
+        for key, value in node.value:
+            if not prefix and key.value == "cluster":
+                continue  # Install-record metadata is not configuration.
+            name = prefix + key.value
+            if isinstance(value, yaml.MappingNode):
+                flatten(value, name + ".")
+            elif isinstance(value, yaml.ScalarNode):
+                if name in document:
+                    raise ValueError(f"setting {name!r} is set twice")
+                document[name] = "" if value.tag == "tag:yaml.org,2002:null" else value.value
+            else:
+                raise ValueError(f"setting {name!r} must be a scalar")
+
+    if path:
+        flatten(yaml.compose(Path(path).read_text()))
+        if document.get("apiVersion") != "install.ate.dev/v1alpha1" or document.get("kind") != "SubstrateInstall":
+            raise ValueError("expected an install.ate.dev/v1alpha1 SubstrateInstall configuration")
+    values = {
+        "context": document.get("context", ""),
+        "kubeconfig": document.get("kubeconfig", os.environ.get("KUBECONFIG", "")),
+        "namespace": document.get("namespace", os.environ.get("ATE_NAMESPACE", "ate-system")),
+        "kind": document.get("kindCluster.enabled", os.environ.get("ATE_INSTALL_KIND", "false")),
+        "kind_cluster_name": document.get("kindCluster.name", os.environ.get("KIND_CLUSTER_NAME", "kind")),
+        "gcp_project_id": document.get("gcp.projectID", os.environ.get("PROJECT_ID", "")),
+        "gcp_cluster_name": document.get("gcp.clusterName", os.environ.get("CLUSTER_NAME", "")),
+        "gcp_cluster_location": document.get("gcp.clusterLocation", os.environ.get("CLUSTER_LOCATION", "")),
+        "ko_docker_repo": document.get("ko.dockerRepo", os.environ.get("KO_DOCKER_REPO", "")),
+        "ko_default_platforms": document.get("ko.defaultPlatforms", os.environ.get("KO_DEFAULTPLATFORMS", "")),
+        "storage_bucket_name": document.get("storage.bucketName", os.environ.get("BUCKET_NAME", "")),
+    }
+    for name in values:
+        if (value := getattr(options, name)) is not None:
+            values[name] = value
+    enabled = str(values["kind"]).lower()
+    if enabled not in ("true", "false", "t", "f", "1", "0"):
+        raise ValueError(f"invalid --kind value: {values['kind']!r}")
+    is_kind = enabled in ("true", "t", "1")
+    os.environ.update(
+        {
+            "PROJECT_ID": str(values["gcp_project_id"]),
+            "CLUSTER_NAME": str(values["gcp_cluster_name"]),
+            "CLUSTER_LOCATION": str(values["gcp_cluster_location"]),
+            "KO_DOCKER_REPO": str(values["ko_docker_repo"]),
+            "KO_DEFAULTPLATFORMS": str(values["ko_default_platforms"]),
+            "BUCKET_NAME": str(values["storage_bucket_name"]),
+            "ATE_NAMESPACE": str(values["namespace"]),
+            "ATE_INSTALL_KIND": str(is_kind).lower(),
+            "KIND_CLUSTER_NAME": str(values["kind_cluster_name"]),
+        }
+    )
+    # An empty explicit path keeps client-go's default loading behavior and
+    # must not fall back to an ambient KUBECONFIG.
+    if values["kubeconfig"]:
+        os.environ["KUBECONFIG"] = str(values["kubeconfig"])
+    elif "kubeconfig" in document or options.kubeconfig is not None:
+        os.environ.pop("KUBECONFIG", None)
+    context = str(values["context"] or "")
+    if is_kind and not context:
+        context = "kind-" + str(values["kind_cluster_name"])
+    if not context and values["gcp_project_id"]:
+        if not values["gcp_cluster_name"] or not values["gcp_cluster_location"]:
+            raise ValueError("GKE target requires a cluster name and location")
+        run(["gcloud", "container", "clusters", "get-credentials",
+             str(values["gcp_cluster_name"]), "--location", str(values["gcp_cluster_location"]),
+             "--project", str(values["gcp_project_id"])])
+    if not context:
+        context = subprocess.check_output(
+            ["kubectl", "config", "current-context"], text=True
+        ).strip()
+        if not context:
+            raise ValueError("the selected kubeconfig has no current context")
+    os.environ["KUBECTL_CONTEXT"] = context
+    target = ["--config", path, "--context", context,
+              "--kind=" + str(is_kind).lower(), "--namespace", str(values["namespace"])]
+    if kubeconfig := os.environ.get("KUBECONFIG"):
+        target += ["--kubeconfig", kubeconfig]
+    return target
+
+
 def wait_for_docker(timeout: int = 120) -> None:
     print("Waiting for DIND sidecar...", flush=True)
     start = time.time()
@@ -256,6 +383,10 @@ def registry_host(ko_docker_repo: str) -> str:
 
 def sanitize(name: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+
+
+def target_cache_key() -> tuple[str, ...]:
+    return tuple(os.environ.get(name, "") for name in TARGET_ENV_KEYS)
 
 
 # Kubernetes copies a Job's name into the job-name label on the Job and its
@@ -295,6 +426,7 @@ def wait_for_no_active_runners(timeout: int = 300) -> None:
         r = subprocess.run(
             [
                 "kubectl",
+                *kube_flags(),
                 "get",
                 "jobs",
                 "-n",
@@ -332,7 +464,7 @@ def wait_for_job(name: str, timeout_seconds: int) -> str:
     start = time.time()
     while time.time() - start < timeout_seconds:
         r = subprocess.run(
-            ["kubectl", "get", "job", name, "-n", NAMESPACE, "-o", "json"],
+            ["kubectl", *kube_flags(), "get", "job", name, "-n", NAMESPACE, "-o", "json"],
             capture_output=True,
             text=True,
             check=False,
@@ -381,26 +513,41 @@ def validate_and_normalize_tests(tests: list[dict[str, Any]]) -> None:
         TYPES[ttype].validate(t)
 
 
-def deploy_substrate(ate_args: Iterable[str] = ()) -> None:
-    run(["hack/install-ate.sh", "--config", ATE_CONFIG_FILE_NAME, "--deploy-ate-system", *(str(a) for a in ate_args)])
+def deploy_substrate(ate_args: Iterable[str] = (), target: Iterable[str] = ()) -> None:
+    run(
+        [
+            "hack/install-ate.sh",
+            "--config",
+            ATE_CONFIG_FILE_NAME,
+            "--deploy-ate-system",
+            *(str(a) for a in ate_args),
+            *target,
+        ]
+    )
 
 
-def teardown_substrate() -> None:
-    run_no_check(["hack/install-ate.sh", "--config", ATE_CONFIG_FILE_NAME, "--delete-ate-system"])
+def teardown_substrate(ate_args: Iterable[str] = (), target: Iterable[str] = ()) -> None:
+    run_no_check([
+        "hack/install-ate.sh", "--config", ATE_CONFIG_FILE_NAME, "--delete-ate-system",
+        *(str(a) for a in ate_args), *target,
+    ])
 
 
-def install_microvm_deps() -> None:
+def install_microvm_deps(ate_args: Iterable[str] = (), target: Iterable[str] = ()) -> None:
     """Stage kata/cloud-hypervisor assets and apply the cluster-wide
     microvm SandboxConfig. Required before a microvm ActorTemplate can
     boot; must run after deploy_substrate() (which installs the CRDs)."""
-    run(["hack/install-microvm-deps.sh", "--install"])
+    run([
+        "hack/install-ate.sh", "--config", ATE_CONFIG_FILE_NAME, "--setup-microvm",
+        *(str(a) for a in ate_args), *target,
+    ])
 
 
 def teardown_microvm_deps() -> None:
     """Remove the microvm SandboxConfig. Must run before
     teardown_substrate(), which deletes the SandboxConfig CRD (and would
     prevent this from succeeding via kubectl)."""
-    run_no_check(["hack/install-microvm-deps.sh", "--delete"])
+    run_no_check(["hack/install-microvm-deps.sh", "--delete", *kube_flags()], env={**os.environ, "NO_DEV_ENV": "1"})
 
 
 def deploy_workloads(
@@ -417,6 +564,7 @@ def deploy_workloads(
         str(worker_count),
         "--sandbox-class",
         sandbox_class,
+        *kube_flags(),
     ]
     # Empty keeps the default in workloads/deploy.sh (256Mi, the microvm
     # minimum); RAM-consuming suites set actorMemory in tests.yaml.
@@ -435,7 +583,7 @@ def deploy_workloads(
 
 
 def teardown_workloads() -> None:
-    run_no_check(["benchmarking/workloads/deploy.sh", "--delete"])
+    run_no_check(["benchmarking/workloads/deploy.sh", "--delete", *kube_flags()])
 
 
 def run_test(
@@ -461,15 +609,15 @@ def run_test(
     wait_for_no_active_runners()
     print(f"Submitting Job {job}", flush=True)
     subprocess.run(
-        ["kubectl", "apply", "-f", "-"], input=manifest, text=True, check=True
+        ["kubectl", *kube_flags(), "apply", "-f", "-"], input=manifest, text=True, check=True
     )
     timeout = parse_duration_seconds(test["duration"]) + 1800
     result = wait_for_job(job, timeout)
     print(f"Job {job} result: {result}", flush=True)
     run_no_check(
-        ["kubectl", "logs", f"job/{job}", "-n", NAMESPACE, "--tail=500"]
+        ["kubectl", *kube_flags(), "logs", f"job/{job}", "-n", NAMESPACE, "--tail=500"]
     )
-    run_no_check(["kubectl", "delete", "job", job, "-n", NAMESPACE])
+    run_no_check(["kubectl", *kube_flags(), "delete", "job", job, "-n", NAMESPACE])
     return result
 
 
@@ -542,10 +690,9 @@ def main() -> None:
     except ValueError as e:
         sys.exit(str(e))
 
-    # Per-target-cluster caches: re-running setup for the same target
-    # cluster is wasted work, so we track what was last set up and only
-    # redo it when the target cluster name changes (substrate images get
-    # rebuilt by install-ate.sh each test anyway via ko apply). Runner
+    # Per-target caches: re-running setup for the same effective target
+    # is wasted work, so we redo it only when a target setting changes
+    # (substrate images get rebuilt by install-ate.sh each test anyway via ko apply). Runner
     # images are built lazily per test type, so a locust-only tests.yaml
     # never builds the nighthawk image and vice versa.
     last_target = None
@@ -570,10 +717,13 @@ def main() -> None:
             continue
 
         try:
-            if target_cluster != last_target:
+            ate_args = test.get("ateArgs", [])
+            target = configure_kube_target(ate_args)
+            effective_target = target_cache_key()
+            if effective_target != last_target:
                 gcloud_setup_for_target_cluster()
                 images = {}
-                last_target = target_cluster
+                last_target = effective_target
             ttype = test_type(test)
             if ttype not in images:
                 images[ttype] = TYPES[ttype].build_image(commit)
@@ -587,19 +737,19 @@ def main() -> None:
             # SandboxConfig CRD that teardown_substrate removes.
             teardown_workloads()
             teardown_microvm_deps()
-            teardown_substrate()
+            teardown_substrate(ate_args, target)
 
             sandbox_class = test.get("sandboxClass", "gvisor")
             status = "error"
             failure_msg = None
             start_time = time.time()
             try:
-                deploy_substrate(test.get("ateArgs", []))
+                deploy_substrate(ate_args, target)
                 TYPES[ttype].pre_test(test)
                 # install-microvm-deps needs the CRDs from deploy_substrate;
                 # deploy_workloads needs the microvm SandboxConfig.
                 if sandbox_class == "microvm":
-                    install_microvm_deps()
+                    install_microvm_deps(ate_args, target)
                 deploy_workloads(
                     test.get("workerCount", 1),
                     sandbox_class,
@@ -630,7 +780,7 @@ def main() -> None:
                 # as above.
                 teardown_workloads()
                 teardown_microvm_deps()
-                teardown_substrate()
+                teardown_substrate(ate_args, target)
             duration = time.time() - start_time
             results.append((test["name"], status, duration, failure_msg))
         finally:

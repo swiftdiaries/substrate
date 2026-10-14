@@ -53,7 +53,7 @@ kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.c
 ### 3. Run the microVM demo
 
 ```sh
-./hack/run-microvm-demo-kind.sh
+./hack/run-microvm-demo-kind.sh --credential-provider='{"name":"k8s.io"}'
 ```
 
 This is a one-shot bring-up: it deploys the control plane, installs the
@@ -164,14 +164,14 @@ echo 'export DOCKER_HOST="unix://${HOME}/.lima/docker-nested/sock/docker.sock"' 
 cd <your substrate checkout>
 
 ./hack/create-kind-cluster.sh
-./hack/run-microvm-demo-kind.sh
+./hack/run-microvm-demo-kind.sh --credential-provider='{"name":"k8s.io"}'
 ```
 
 Verify as in Option A, step 4.
 
 ## Trying it out
 
-On completion, `run-microvm-demo-kind.sh` prints next steps: create an actor
+After `run-microvm-demo-kind.sh` completes, create an actor
 from the `counter-microvm` template, hit the in-RAM counter, then suspend and
 resume it and confirm the count continues — proving the guest-memory snapshot
 round-tripped. The flow is the same as the
@@ -181,6 +181,10 @@ microVM template; see the
 for background. Note that an actor template showing a GOLDEN SNAPSHOT in the
 verify step already exercises the runtime end-to-end — the golden snapshot
 requires a full guest boot and checkpoint.
+
+Pass installer settings with `--config` or flags to either demo wrapper; they
+apply to the control plane, asset staging, and demo. The wrappers do not source
+`.ate-dev-env.sh`. `ARCH` and `OUT` can still select asset-build inputs.
 
 ## Troubleshooting
 

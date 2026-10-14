@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -202,7 +203,12 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 // LoadKubeConfig loads a Kubernetes client configuration from the specified kubeconfig path and context.
 func LoadKubeConfig(kubeconfigPath, k8sContext string) (*rest.Config, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	loadingRules.ExplicitPath = kubeconfigPath
+	if strings.ContainsRune(kubeconfigPath, os.PathListSeparator) {
+		loadingRules.ExplicitPath = ""
+		loadingRules.Precedence = filepath.SplitList(kubeconfigPath)
+	} else {
+		loadingRules.ExplicitPath = kubeconfigPath
+	}
 	configOverrides := &clientcmd.ConfigOverrides{CurrentContext: k8sContext}
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides).ClientConfig()
 }

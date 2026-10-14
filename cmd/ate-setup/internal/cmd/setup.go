@@ -49,6 +49,15 @@ the previous deployment first, which clears stale mounts left behind by an earli
 	},
 }
 
+var setupMicrovmCmd = &cobra.Command{
+	Use:   "microvm",
+	Short: "Stage microVM assets and install the cluster-wide SandboxConfig",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return env.SetupMicroVM(cmd.Context())
+	},
+}
+
 // csiDriver is the driver `setup csi` was asked for, defaulting as the shell
 // installer's setup_csi did.
 func csiDriver(args []string) string {
@@ -60,5 +69,5 @@ func csiDriver(args []string) string {
 
 func init() {
 	rootCmd.AddCommand(setupCmd)
-	setupCmd.AddCommand(setupCSICmd)
+	setupCmd.AddCommand(setupCSICmd, setupMicrovmCmd)
 }

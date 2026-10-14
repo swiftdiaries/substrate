@@ -11,8 +11,10 @@ scenario ladder, read [observability.md](observability.md).
 ## Deploy benchmarks
 
 > [!IMPORTANT]
-> Source the environment configuration file (e.g., `source .ate-dev-env.sh`)
-> first so `PROJECT_ID`, `BUCKET_NAME`, etc. are set.
+> The direct benchmark wrapper needs runtime values such as `PROJECT_ID`,
+> `BUCKET_NAME`, and `KO_DOCKER_REPO` in its process environment. For installer
+> settings, use a config file with `--config` or pass flags; ambient kubeconfig
+> selection follows kubectl conventions.
 
 Note that deploying the benchmarks does not run them. You must visit Locust's
 web UI to start a test.
