@@ -174,7 +174,7 @@ func (e *Env) koRunner() (*ko.Runner, error) {
 // `ate-setup publish release-images` does.
 func (e *Env) dockerfileImage(ctx context.Context, name, contextDir string) (string, error) {
 	if !e.Cfg.Images.IsPrebuilt() {
-		return images.BuildDockerfileImage(ctx, e.Cfg.Root, e.Cfg.KODockerRepo, name, e.Cfg.Path(contextDir), e.Cfg.KODefaultPlatforms, e.Cfg.DockerBuildFlags)
+		return images.BuildDockerfileImage(ctx, e.Cfg.Root, e.Cfg.KODockerRepo, name, e.Cfg.Path(contextDir), e.Cfg.KODefaultPlatforms, e.Cfg.DockerBuildFlags, e.Cfg.ScriptEnv())
 	}
 	resolver, err := e.imageResolver()
 	if err != nil {

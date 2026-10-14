@@ -83,13 +83,13 @@ func dockerBuildArgs(platforms string, extraFlags []string, tag, contextPath str
 // The image is tagged with the build time only to give buildx a stable name to
 // push to; the returned reference always uses the digest, so a stale tag can
 // never be resolved by accident.
-func BuildDockerfileImage(ctx context.Context, rootDir, dockerRepo, imageName, contextPath, koDefaultPlatforms string, extraFlags []string) (string, error) {
-	return PublishDockerfileImage(ctx, rootDir, dockerRepo, imageName, fmt.Sprintf("build-%d", time.Now().Unix()), contextPath, koDefaultPlatforms, extraFlags)
+func BuildDockerfileImage(ctx context.Context, rootDir, dockerRepo, imageName, contextPath, koDefaultPlatforms string, extraFlags, env []string) (string, error) {
+	return PublishDockerfileImage(ctx, rootDir, dockerRepo, imageName, fmt.Sprintf("build-%d", time.Now().Unix()), contextPath, koDefaultPlatforms, extraFlags, env)
 }
 
 // PublishDockerfileImage is BuildDockerfileImage with the tag chosen by the
 // caller, for a release that publishes every image under one tag.
-func PublishDockerfileImage(ctx context.Context, rootDir, dockerRepo, imageName, tag, contextPath, koDefaultPlatforms string, extraFlags []string) (string, error) {
+func PublishDockerfileImage(ctx context.Context, rootDir, dockerRepo, imageName, tag, contextPath, koDefaultPlatforms string, extraFlags, env []string) (string, error) {
 	repo := strings.TrimSuffix(dockerRepo, "/") + "/" + imageName
 	stageTag := repo + ":" + tag
 
@@ -100,6 +100,7 @@ func PublishDockerfileImage(ctx context.Context, rootDir, dockerRepo, imageName,
 	build := exec.CommandContext(ctx, "docker",
 		dockerBuildArgs(platforms, extraFlags, stageTag, contextPath)...)
 	build.Dir = rootDir
+	build.Env = env
 	// The shell version sent build output to stderr so it could capture the
 	// image reference on stdout; keeping that split makes the two behave the
 	// same under CI log capture.
@@ -112,6 +113,7 @@ func PublishDockerfileImage(ctx context.Context, rootDir, dockerRepo, imageName,
 	inspect := exec.CommandContext(ctx, "docker", "buildx", "imagetools", "inspect",
 		stageTag, "--format", "{{json .}}")
 	inspect.Dir = rootDir
+	inspect.Env = env
 	inspect.Stderr = os.Stderr
 	var out bytes.Buffer
 	inspect.Stdout = &out
