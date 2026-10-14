@@ -109,13 +109,14 @@ func (e *Env) RequireCanonicalNamespace(step string) error {
 	return nil
 }
 
-// NewEnv connects to the cluster described by cfg.
-func NewEnv(cfg *config.Config) (*Env, error) {
-	client, err := kube.New(cfg.Kubeconfig, cfg.Context)
+// InitClients builds cluster clients while retaining the Env's cached version.
+func (e *Env) InitClients() error {
+	client, err := kube.New(e.Cfg.Kubeconfig, e.Cfg.Context)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return &Env{Cfg: cfg, Kube: client}, nil
+	e.Kube = client
+	return nil
 }
 
 // imageResolver returns the image resolver, creating it on first use.

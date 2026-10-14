@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -208,5 +209,42 @@ func TestServerTLSConfigErrors(t *testing.T) {
 				t.Error("serverTLSConfig: want error, got nil")
 			}
 		})
+	}
+}
+
+func TestLoadKubeConfigUsesPathListPrecedence(t *testing.T) {
+	write := func(name, server string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		data := fmt.Sprintf(`apiVersion: v1
+kind: Config
+current-context: %s
+clusters:
+- name: cluster
+  cluster:
+    server: %s
+contexts:
+- name: %s
+  context:
+    cluster: cluster
+    user: user
+users:
+- name: user
+  user:
+    token: token
+`, name, server, name)
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	first := write("first", "https://first.example")
+	second := write("second", "https://second.example")
+	cfg, err := LoadKubeConfig(strings.Join([]string{first, second}, string(os.PathListSeparator)), "")
+	if err != nil {
+		t.Fatalf("LoadKubeConfig: %v", err)
+	}
+	if got, want := cfg.Host, "https://first.example"; got != want {
+		t.Errorf("Host = %q, want first file's server %q", got, want)
 	}
 }

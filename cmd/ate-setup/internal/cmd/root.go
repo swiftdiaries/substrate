@@ -98,15 +98,22 @@ input.`,
 		// Reported before the cluster is touched, so the settings are on
 		// screen even when connecting fails.
 		resolved.Report(log.Writer(), config.ReportOptions{OmitDefaults: noReportDefaults})
+		runEnv := &steps.Env{Cfg: cfg}
+		if cmd == deployAteSystemCmd {
+			if err := validateDeployConfig(runEnv); err != nil {
+				return err
+			}
+		}
 
 		// Populate GKE credentials before any client is built.
 		if err := cfg.EnsureClusterCredentials(cmd.Context()); err != nil {
 			return err
 		}
-		env, err = steps.NewEnv(cfg)
-		if err != nil {
+		if err := runEnv.InitClients(); err != nil {
+			env = nil
 			return err
 		}
+		env = runEnv
 		return nil
 	},
 	// The bare command has no Run: cobra prints the help text and exits, and

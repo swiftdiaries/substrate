@@ -26,20 +26,13 @@
 # rotation and teardown; phase_report.py reads `gcloud logging read
 # --format json` output directly.
 #
-# Like the other hack scripts, this sources .ate-dev-env.sh from the repo root
-# for the cluster settings unless NO_DEV_ENV is set, and respects
-# KUBECTL_CONTEXT.
+# Uses standard kubeconfig selection; supply cluster settings explicitly.
 #
 # Usage: collect_logs.sh --dest DIR [--since 30m | --since-time 2026-09-24T18:00:00Z]
 #                        [--namespace ate-system] [--worker-namespace benchmark-workloads]
 
 set -uo pipefail
 
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-if [[ -r "${ROOT}/.ate-dev-env.sh" ]] && [[ -z "${NO_DEV_ENV:-}" ]]; then
-  # shellcheck source=/dev/null
-  source "${ROOT}/.ate-dev-env.sh"
-fi
 run_kubectl() { kubectl ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} "$@"; }
 
 DEST=""

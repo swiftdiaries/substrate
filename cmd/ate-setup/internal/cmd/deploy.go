@@ -36,14 +36,42 @@ const deployAteSystemPath = "deploy ate-system"
 // only here is the channel that supplied the value known. `setup csi` takes
 // its driver as a positional argument and keeps the plain message, which is
 // correct for an argument: there is no channel to name.
-func deployOptions() (steps.DeployOptions, error) {
-	r := env.Cfg.Resolved()
+func deployOptions(cfg *config.Config) (steps.DeployOptions, error) {
+	r := cfg.Resolved()
 	opts := steps.DeployOptions{SetupCSI: r.String("csi.setup")}
 	if err := steps.ValidateCSIDriver(opts.SetupCSI); err != nil {
 		v, _ := r.Value("csi.setup")
 		return opts, &config.InvalidError{Value: v, Want: "nfs, hostpath, both or none"}
 	}
 	return opts, nil
+}
+
+// validateDeployConfig is shared by deployment and automation's preflight.
+// The Env has configuration only; these checks cannot use cluster clients.
+func validateDeployConfig(e *steps.Env) error {
+	opts, err := deployOptions(e.Cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := e.ValidateDeployAteSystem(opts); err != nil {
+		return err
+	}
+	return e.Cfg.ValidateClusterCredentials()
+}
+
+// validateDeployArgs checks explicit CSI flags before loading configuration.
+func validateDeployArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.NoArgs(cmd, args); err != nil {
+		return err
+	}
+	if !cmd.Flags().Changed("setup-csi") {
+		return nil
+	}
+	driver, err := cmd.Flags().GetString("setup-csi")
+	if err != nil {
+		return err
+	}
+	return steps.ValidateCSIDriver(driver)
 }
 
 var deployAteSystemCmd = &cobra.Command{
@@ -60,26 +88,9 @@ or ateapi.postgres.cloudsql.instance (via --config or its flags) selects Cloud S
 
 Shape the install with the global --atenet-dataplane, --cluster-size, and
 --cordon-control-plane flags.`,
-	// Args runs before the root command loads the configuration, so only the
-	// flag is readable here. Checking it keeps an unusable value from costing
-	// a credential fetch, which is the common case; a value arriving from a
-	// configuration file is checked in RunE instead, where
-	// the resolved settings exist.
-	Args: func(cmd *cobra.Command, args []string) error {
-		if err := cobra.NoArgs(cmd, args); err != nil {
-			return err
-		}
-		if !cmd.Flags().Changed("setup-csi") {
-			return nil
-		}
-		driver, err := cmd.Flags().GetString("setup-csi")
-		if err != nil {
-			return err
-		}
-		return steps.ValidateCSIDriver(driver)
-	},
+	Args: validateDeployArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		opts, err := deployOptions()
+		opts, err := deployOptions(env.Cfg)
 		if err != nil {
 			return err
 		}

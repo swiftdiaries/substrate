@@ -45,6 +45,12 @@ caller_path() {
 # Keep kubeconfig paths relative to the directory that invoked the shim even
 # though the shim runs ate-setup from the repository root. Empty list entries
 # and absolute paths keep client-go's native KUBECONFIG semantics.
+# Internal automation mode: parse all options, suppress actions, then validate.
+VALIDATE_CONFIG=0
+if [[ "${1:-}" == --validate-config ]]; then
+  VALIDATE_CONFIG=1
+  shift
+fi
 caller_kubeconfig() {
   local remaining="$1" entry result="" separator=""
   while :; do
@@ -120,6 +126,7 @@ usage() {
   echo "Overall infrastructure (all infrastructure components):"
   echo ""
   echo "  --deploy-ate-system                    Deploy core system (CRDs, atelet, apiserver)"
+  echo "  --setup-microvm                         Stage microVM assets and install the cluster-wide SandboxConfig"
   echo "  --setup-csi[=DRIVER]                   Setup CSI driver: nfs, hostpath, both, none (default: none;"
   echo "                                         a bare --setup-csi means nfs; hostpath is Kind only)"
   echo "  --delete-ate-system                    Delete core system"
@@ -222,6 +229,7 @@ usage() {
 # flags that shape every action, which is how they behaved here: a single
 # command line could ask for several actions and one --atenet-dataplane.
 ate_setup() {
+  if (( VALIDATE_CONFIG )); then return; fi
   go run ./cmd/ate-setup ${GLOBAL_FLAGS[@]+"${GLOBAL_FLAGS[@]}"} "$@"
 }
 
@@ -258,6 +266,10 @@ fi
 for arg in "$@"; do
   case "$arg" in
     -h|--help)
+      if (( VALIDATE_CONFIG )); then
+        echo "Error: help is not an installation setting" >&2
+        exit 1
+      fi
       usage
       exit 0
       ;;
@@ -298,7 +310,7 @@ is_shim_option_or_action() {
     [[ "${token}" == "${flag}" ]] && return 0
   done
   case "${token}" in
-    --setup-csi|--benchmark-worker-count|--benchmark-sandbox-class|--storage-class|--with-external-volume|\
+    --setup-microvm|--setup-csi|--benchmark-worker-count|--benchmark-sandbox-class|--storage-class|--with-external-volume|\
     --deploy-ate-system|--delete-ate-system|--delete-all|--deploy-atelet|--deploy-ate-apiserver|\
     --deploy-atenet|--delete-atenet|--deploy-benchmarks|--delete-benchmarks|\
     --create-jwt-authority-pool-secret|--create-actor-id-ca-pool-secret|--create-actor-id-ca-certs-secret|\
@@ -431,6 +443,7 @@ while [[ "$#" -gt 0 ]]; do
         ate_setup deploy ate-system
       fi
       ;;
+    --setup-microvm) ate_setup setup microvm ;;
     --setup-csi=*) ate_setup setup csi "${SETUP_CSI}" ;;
     --setup-csi)
       if [[ "$#" -gt 1 && "$2" != --* ]]; then
@@ -475,3 +488,8 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+if (( VALIDATE_CONFIG )); then
+  if (( SETUP_CSI_SET )); then GLOBAL_FLAGS+=("--setup-csi=${SETUP_CSI}"); fi
+  go run ./cmd/ate-setup ${GLOBAL_FLAGS[@]+"${GLOBAL_FLAGS[@]}"} validate
+fi

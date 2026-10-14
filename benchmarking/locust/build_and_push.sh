@@ -19,12 +19,6 @@ set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-# Standalone use keeps the developer environment; ate-setup supplies resolved
-# settings and sets NO_DEV_ENV so a stale dotfile cannot override them.
-if [[ -z "${NO_DEV_ENV:-}" && -f .ate-dev-env.sh ]]; then
-  source .ate-dev-env.sh
-fi
-
 if [ -z "${PROJECT_ID:-}" ]; then
   echo "Error: PROJECT_ID environment variable must be set." >&2
   exit 1

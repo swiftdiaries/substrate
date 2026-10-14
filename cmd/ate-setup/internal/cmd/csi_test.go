@@ -22,7 +22,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
-	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
 )
 
 // runRoot executes the command tree with args, quietly.
@@ -146,11 +145,8 @@ func TestCSIDriverFlagIsStillRejected(t *testing.T) {
 			r := resolveTestFlags(t, "deploy ate-system", map[string]string{"setup-csi": tc.driver})
 			cfg := &config.Config{}
 			cfg.SetResolved(r)
-			prev := env
-			env = &steps.Env{Cfg: cfg}
-			t.Cleanup(func() { env = prev })
 
-			_, err := deployOptions()
+			_, err := deployOptions(cfg)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("deployOptions() = nil error for driver %q, want one", tc.driver)

@@ -15,11 +15,13 @@
 # limitations under the License.
 
 # Interactive wizard:
-#  1. Use the repo's .ate-dev-env.sh as the authoritative source for the
-#     target cluster's environment. The script snapshots it to
+#  1. Use the repo's .ate-dev-env.sh for target-cluster provisioning and
+#     benchmark-tool inputs. The script snapshots it to
 #     scratch/target-clusters/<name>.sh; edit .ate-dev-env.sh and re-run
 #     to refresh that snapshot. Re-run with a different name (after editing
 #     .ate-dev-env.sh again if needed) to add another target cluster.
+#     Installer settings are translated into a temporary ate-setup config and
+#     passed with --config; they are not inherited as ambient ate-setup env.
 #  2. Build & push the orchestrator image to the orchestrator GCP project's
 #     registry (the only value not derivable from .ate-dev-env.sh).
 #  3. Generate three independent manifests in scratch/ so each can be
@@ -65,9 +67,9 @@ prompt() {
 
 echo "=== Substrate benchmark orchestrator setup ==="
 echo
-echo "This wizard treats ${ATE_DEV_ENV} as the authoritative source for the"
-echo "target cluster's environment. Edit that file before continuing if its"
-echo "values need adjusting for the target cluster you're configuring."
+echo "This wizard uses ${ATE_DEV_ENV} for target provisioning and benchmark tools."
+echo "Installer settings are translated into a temporary ate-setup config."
+echo "Edit that file before continuing if target-specific inputs need adjusting."
 echo
 
 if [[ ! -f "${ATE_DEV_ENV}" ]]; then

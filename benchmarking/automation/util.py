@@ -14,10 +14,22 @@
 
 """Helpers shared by orchestrator.py and the per-test-type modules."""
 
+import os
 import re
 import shlex
 import subprocess
 import time
+
+
+def kube_flags() -> list[str]:
+    args: list[str] = []
+    kubeconfig = os.environ.get("KUBECONFIG", "")
+    if kubeconfig and os.pathsep not in kubeconfig:
+        args += ["--kubeconfig", kubeconfig]
+    context = os.environ.get("KUBECTL_CONTEXT", "")
+    if context:
+        args += ["--context", context]
+    return args
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:

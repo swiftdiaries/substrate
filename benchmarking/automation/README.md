@@ -49,7 +49,7 @@ Each entry in `tests.yaml` may set `sandboxClass: gvisor | microvm` (default
 and its `workerImage` (`ateom-gvisor` vs `ateom-microvm`).
 
 For `microvm` tests the target cluster must have KVM-capable nodes and the
-object store bucket named in its `.ate-dev-env.sh` must be writable by the
+object store bucket named in the target cluster config must be writable by the
 orchestrator's Workload Identity principal.
 
 ## Setup
@@ -58,16 +58,28 @@ orchestrator's Workload Identity principal.
 ./benchmarking/automation/setup.sh
 ```
 
-The wizard treats the repo's `.ate-dev-env.sh` as the source of truth for the
-target cluster's environment and snapshots it to
-`scratch/target-clusters/<name>.sh`. It only prompts for the target cluster
-name (the routing key in `tests.yaml`) and the GCP project ID of the
-orchestrator image registry. It then builds + pushes the orchestrator image
+The wizard snapshots `.ate-dev-env.sh` to
+`scratch/target-clusters/<name>.sh` as target-cluster inputs. During a run, the
+orchestrator uses those values for GCP and benchmark tools, then writes the
+installer settings to a temporary config file passed with `--config`. The
+process's ordinary installer variables are cleared before the target script is
+sourced, so omitted settings use installer defaults. Credentials and other tool
+inputs remain available.
+
+The wizard prompts for the target cluster name (the routing key in `tests.yaml`)
+and the GCP project ID of the orchestrator image registry. It then builds + pushes the orchestrator image
 to `gcr.io/<ORCH_PROJECT_ID>/ate-images/substrate-benchmark-orchestrator:<short-commit>`
 (with a `-dirty` suffix if `benchmarking/automation/` has uncommitted
 changes) and renders `scratch/cronjob.yaml`, `scratch/test-list.yaml`, and
-`scratch/target-clusters.yaml`. You can edit the `.ate-dev-env.sh` for your
-workload cluster directly in the config map. 
+`scratch/target-clusters.yaml`. Edit the target cluster config map to change
+workload cluster parameters; the orchestrator converts installer settings to
+`--config` input for each run.
+
+Target settings in a test's `ateArgs`, including an explicit `--config`, apply
+to the initial cleanup, deployment, benchmark commands, and final cleanup.
+The orchestrator validates the complete configuration with ate-setup before
+resolving kubeconfig and context or starting the first cleanup. Invalid or
+unknown settings stop the run before cleanup; every phase uses the same target.
 
 Then edit the `--repo / --branch / --dest` args in `scratch/cronjob.yaml` and
 apply:

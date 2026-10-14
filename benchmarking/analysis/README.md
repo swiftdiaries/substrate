@@ -35,8 +35,8 @@ A failed atelet operation still writes its record, marked with `error.type`
    ./collect_logs.sh --dest /tmp/run1 --since-time 2026-09-24T18:00:00Z
    ```
 
-   The script sources `.ate-dev-env.sh` from the repository root when present
-   (set `NO_DEV_ENV` to skip) and honors `KUBECTL_CONTEXT`, like the `hack/`
+   The script uses standard kubeconfig selection and honors `KUBECTL_CONTEXT`,
+   like the `hack/`
    scripts. `--since-time` (or a relative `--since 30m`) should cover the run
    and nothing before it. `--namespace` (default `ate-system`) selects the
    atelet pods and `--worker-namespace` (default `benchmark-workloads`) the

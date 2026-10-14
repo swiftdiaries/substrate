@@ -25,7 +25,7 @@ import os
 import re
 from typing import Any
 
-from util import build_and_push, parse_duration_seconds, run
+from util import build_and_push, kube_flags, parse_duration_seconds, run
 
 TEST_TYPE = "nighthawk-ingress"
 
@@ -155,6 +155,7 @@ def pre_test(test: dict[str, Any]) -> None:
     run(
         [
             "kubectl",
+            *kube_flags(),
             "-n",
             "ate-system",
             "patch",
@@ -168,6 +169,7 @@ def pre_test(test: dict[str, Any]) -> None:
     run(
         [
             "kubectl",
+            *kube_flags(),
             "-n",
             "ate-system",
             "rollout",

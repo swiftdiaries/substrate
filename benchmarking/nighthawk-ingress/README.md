@@ -119,7 +119,7 @@ README, with nodes big enough for the two large pods (the router pod
 requests 2×`envoyCpu` CPUs; the runner requests `clientConcurrency`+1).
 
 ```bash
-# .ate-dev-env.sh at the repo root, then:
+# an explicit installer config or flags, then:
 hack/install-ate.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}'
 benchmarking/workloads/deploy.sh --deploy --worker-count 50 --sandbox-class gvisor
 ```

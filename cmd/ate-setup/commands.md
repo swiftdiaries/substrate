@@ -11,11 +11,6 @@ this table is how to write it directly, and
 go run ./cmd/ate-setup [global flags] <command> [flags]
 ```
 
-Installer settings resolve as `default < --config file < flag`. Only the read/write
-DSN, owner DSN, and Anthropic API key accept environment input; file values
-override those secrets. Ambient `KUBECONFIG` follows client-go conventions,
-while `--kubeconfig` or a file value takes precedence.
-
 `hack/install-ate.sh` accepts its flags in any order and runs one action per
 flag, in command line order. `ate-setup` runs exactly one command per
 invocation, so a shell line that passed several `--deploy-*` flags becomes
@@ -28,24 +23,25 @@ a pre-scan pass, so they may appear anywhere on its command line.
 
 | `ate-setup` | `hack/install-ate.sh` | Notes |
 |---|---|---|
-| `--kind` | `hack/install-ate-kind.sh` | Kind overlays, the local registry, and host-architecture image builds |
+| `--kind` | `hack/install-ate-kind.sh`, or `ATE_INSTALL_KIND=true` | Kind overlays, the local registry, and host-architecture image builds |
 | `--atenet-dataplane envoy\|agentgateway` | `--atenet-dataplane envoy\|agentgateway` | atenet ingress and egress dataplane (default `envoy`) |
 | `--rollout-timeout DURATION` | `--rollout-timeout DURATION` | Readiness timeout for workloads (default `60s`). Unlike the shell flag it also governs the podcertificate-controller and CSI waits, which stay at their 120s default until it is passed |
 | `--podcert-workers-per-signer N` | `--podcert-workers-per-signer N` | Concurrent workers per podcertificate-controller signer |
-| `--cluster-size size0\|size10` | `--cluster-size size0\|size10` | Footprint profile (default `size0`). `size10` assumes a dedicated PostgreSQL node: it resizes the bundled StatefulSet and its `postgresql.conf`, pins the apiserver's connection pool, and raises the podcertificate-controller's API rate limits |
-| `--ateapi-postgres-storage-class NAME` | `--ateapi-postgres-storage-class NAME` | StorageClass for the bundled PostgreSQL volume instead of the cluster default, such as `dynamic-rwo` on GKE so C4 and N4 nodes can attach it. An existing install must delete the postgres StatefulSet and its claim first |
-| `--cordon-control-plane` | `--cordon-control-plane` | Keep the control plane off the worker nodes. Assumes a small shared pool labeled and tainted `ate.dev/workloadType=ate-control-plane:NoSchedule`, across which each workload's replicas are spread, and a one-node pool labeled and tainted `ate.dev/workloadType=ate-postgres:NoSchedule` for postgres alone. |
+| `--cluster-size size0\|size10` | `--cluster-size size0\|size10` | Footprint profile (default `size0`). `size10` assumes a dedicated PostgreSQL node: it resizes the bundled StatefulSet and its `postgresql.conf`, pins the apiserver's connection pool, and raises the podcertificate-controller's API rate limits. `ATE_INSTALL_CLUSTER_SIZE` when the flag is absent |
+| `--ateapi-postgres-storage-class NAME` | `ATE_API_POSTGRES_STORAGE_CLASS=NAME` | StorageClass for the bundled PostgreSQL volume instead of the cluster default, such as `dynamic-rwo` on GKE so C4 and N4 nodes can attach it. An existing install must delete the postgres StatefulSet and its claim first |
+| `--cordon-control-plane` | `--cordon-control-plane` | Keep the control plane off the worker nodes. Assumes a small shared pool labeled and tainted `ate.dev/workloadType=ate-control-plane:NoSchedule`, across which each workload's replicas are spread, and a one-node pool labeled and tainted `ate.dev/workloadType=ate-postgres:NoSchedule` for postgres alone. `ATE_INSTALL_CORDON_CONTROL_PLANE=true` when the flag is absent |
 | `--experimental-additional-egress-extproc-service NS/SVC:PORT` | `--experimental-additional-egress-extproc-service NS/SVC:PORT` | External processor authorization filter |
-| `--credential-provider JSON` | `--credential-provider JSON` | Required by `deploy ate-system` and `deploy atenet`. A JSON object: `{"name":"k8s.io"}` deploys and uses the bundled Kubernetes Secrets provider, with a NetworkPolicy that admits only the egress gateway; `{"enabled":false}` turns egress credential injection off; `{"name":"<provider>","address":"<host>:<port>"}` uses a provider you deploy yourself. See [`docs/egress-credential-injection.md`](../../docs/egress-credential-injection.md) |
-| `--otlp-endpoint URL` | `--otlp-endpoint URL` | Send control plane telemetry to `URL` instead of the cluster default (see [`benchmarking/telemetry/README.md`](../../benchmarking/telemetry/README.md)) |
-| `--context NAME` | `--context NAME` | Kubeconfig context |
-| `--kubeconfig PATH` | `--kubeconfig PATH` | Explicit kubeconfig path; otherwise client-go uses ambient `KUBECONFIG` |
-| `--config PATH` | `--config PATH` | Read installation settings from a file |
-| `--version` / `-v` | — | Print ate-setup version |
-| `--build-version VERSION` | `--build-version VERSION` | Source builds only; prebuilt identity comes from `--image-tag`, and overrides are rejected |
+| `--credential-provider JSON` | `--credential-provider JSON`, or `ATE_CREDENTIAL_PROVIDER` | Required by `deploy ate-system` and `deploy atenet`. A JSON object: `{"name":"k8s.io"}` deploys and uses the bundled Kubernetes Secrets provider, with a NetworkPolicy that admits only the egress gateway; `{"enabled":false}` turns egress credential injection off; `{"name":"<provider>","address":"<host>:<port>"}` uses a provider you deploy yourself. See [`docs/egress-credential-injection.md`](../../docs/egress-credential-injection.md) |
+| `--otlp-endpoint URL` | `--otlp-endpoint URL`, or `ATE_OTLP_ENDPOINT=URL` | Send control plane telemetry to `URL` instead of the cluster default (see [`benchmarking/telemetry/README.md`](../../benchmarking/telemetry/README.md)) |
+| `--context NAME` | `KUBECTL_CONTEXT=NAME` | Kubeconfig context; still defaults to `KUBECTL_CONTEXT` |
+| `--kubeconfig PATH` | `KUBECONFIG=PATH` | Explicit kubeconfig path |
+| `--no-dev-env` | `NO_DEV_ENV=1` | Skip `.ate-dev-env.sh` at the repository root |
+| `--version` / `-v` | — | New; the shell installer had no version |
 | `--image-repo REPO` | — | New. Install pre-built images from `REPO` instead of building them with `ko` |
 | `--image-tag TAG` | — | New. The tag those images carry. Each of the two requires the other |
 
+Both have an environment equivalent, read when the flag is absent:
+`ATE_IMAGE_REPO` and `ATE_IMAGE_TAG`.
 
 ## Installing a release
 
@@ -67,7 +63,7 @@ toolchain, and write access to a registry.
 `REPO` has to hold every component image the manifests reference, all under the
 same tag, which is how a release publishes them. A release that adds a component
 has to publish it alongside the others before a pre-built install can use it.
-`ate-setup publish release-images --build-version TAG --ko-docker-repo REPO` publishes
+`VERSION=TAG ate-setup publish release-images --ko-docker-repo REPO` publishes
 the full set, including `envoy-dataplane`, which is built from a Dockerfile with
 `docker buildx` rather than with `ko`. A build from source builds that image itself, so
 it needs `docker` as well as `ko`.
@@ -148,9 +144,18 @@ Individual secrets and config that `deploy ate-system` creates automatically.
 | `ate-setup` | `hack/install-ate.sh` |
 |---|---|
 | `setup csi [driver]` | `--setup-csi[=DRIVER]` |
+| `setup microvm` | `--setup-microvm` |
 
 `driver` is one of `nfs`, `hostpath`, `both`, or `none`; `setup csi` with `none` as the default option. The hostpath is for KIND clusters only. NFS has no such
 restriction, but it does need the `nfsd` kernel module loaded on the nodes.
+
+`setup microvm` runs the existing asset assembly/staging helper and applies the
+cluster-wide microVM SandboxConfig. It uses the installer's resolved target,
+bucket, and platform; `ARCH` and `OUT` remain optional asset-build inputs.
+`hack/run-microvm-demo.sh --config install.yaml` runs control-plane deployment,
+microVM setup, and the counter demo with the same settings. The Kind wrapper
+adds `--kind`; its defaults remain below file settings and explicit flags.
+
 
 ## Benchmarks
 
@@ -160,10 +165,10 @@ restriction, but it does need the `nfsd` kernel module loaded on the nodes.
 | `delete benchmarks` | `--delete-benchmarks` |
 | `--worker-count N` | `--benchmark-worker-count N` (default `1`) |
 | `--sandbox-class gvisor\|microvm` | `--benchmark-sandbox-class CLASS` (default `gvisor`) |
-| `--benchmark-actor-memory SIZE` | `--benchmark-actor-memory SIZE` (default `256Mi`) |
+| `BENCHMARK_ACTOR_MEMORY=SIZE` | `--benchmark-actor-memory SIZE` (default `256Mi`) |
 
-The benchmark actor memory is an ordinary setting supplied by a config file or
-`--benchmark-actor-memory`; it is not read from the environment.
+The memory limit has no flag: `benchmarking/workloads/deploy.sh` has always
+taken it from the environment, and the shim exports it.
 
 The other two flags are per-command in `ate-setup` and global in
 `hack/install-ate.sh`, which forwards them to whichever benchmark action runs.
