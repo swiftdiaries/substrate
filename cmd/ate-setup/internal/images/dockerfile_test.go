@@ -77,3 +77,37 @@ func TestDockerfilePlatforms(t *testing.T) {
 		})
 	}
 }
+
+func TestPublishDockerfileImageUsesChildEnvironment(t *testing.T) {
+	bin := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "docker.log")
+	script := `#!/bin/sh
+printf '%s|%s|%s\n' "$1" "${ATE_NAMESPACE-unset}" "$GITHUB_TOKEN" >> "$DOCKER_TEST_LOG"
+if [ "$2" = imagetools ]; then
+  printf '{"manifest":{"digest":"sha256:resolved"}}'
+fi
+`
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_TEST_LOG", capture)
+	t.Setenv("ATE_NAMESPACE", "hostile")
+	env := []string{"PATH=" + os.Getenv("PATH"), "DOCKER_TEST_LOG=" + capture, "GITHUB_TOKEN=tool-credential"}
+
+	got, err := PublishDockerfileImage(t.Context(), t.TempDir(), "repo", "envoy", "v1.2.3", ".", "linux/amd64", nil, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "repo/envoy@sha256:resolved" {
+		t.Fatalf("PublishDockerfileImage() = %q, want resolved digest", got)
+	}
+	log, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "buildx|unset|tool-credential\nbuildx|unset|tool-credential\n"
+	if string(log) != want {
+		t.Errorf("docker commands saw %q, want %q", log, want)
+	}
+}

@@ -89,7 +89,7 @@ func (e *Env) PublishReleaseImages(ctx context.Context, w io.Writer) error {
 		return err
 	}
 	envoy, err := images.PublishDockerfileImage(ctx, e.Cfg.Root, e.Cfg.KODockerRepo, envoyDataplaneImage, tag,
-		e.Cfg.Path(envoyDataplaneDockefile), e.Cfg.KODefaultPlatforms, e.Cfg.DockerBuildFlags)
+		e.Cfg.Path(envoyDataplaneDockefile), e.Cfg.KODefaultPlatforms, e.Cfg.DockerBuildFlags, e.Cfg.ScriptEnv())
 	if err != nil {
 		return err
 	}

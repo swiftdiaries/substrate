@@ -220,7 +220,7 @@ func (e *Env) setupCSIHostpath(ctx context.Context) error {
 		return err
 	}
 	log.Infof("Using Kind node: %s", node)
-	cleanupKindAteomDir(node)
+	cleanupKindAteomDir(node, e.Cfg.ScriptEnv())
 
 	// Before the driver, not after: atelet talks to the controller over TCP,
 	// the socat sidecar bridges that to the driver's unix socket, and
@@ -509,20 +509,22 @@ func (e *Env) kindNodeName(ctx context.Context) (string, error) {
 // not be running at all when only the CSI drivers are being reinstalled. The
 // directory itself is kept so that mounts held by running pods such as atelet
 // survive.
-func cleanupKindAteomDir(node string) {
+func cleanupKindAteomDir(node string, env []string) {
 	log.Infof("Cleaning up CSI directories on the Kind node...")
-	if !dockerContainerRunning(node) {
+	if !dockerContainerRunning(node, env) {
 		log.Warnf("Kind node %s is not running. Skipping directory cleanup.", node)
 		return
 	}
 
 	unmount := fmt.Sprintf(`for mnt in $(mount | grep %s | awk '{print $3}'); do umount -f "${mnt}" || true; done`, ateomHostDir)
-	runQuiet("docker", "exec", node, "sh", "-c", unmount)
-	runQuiet("docker", "exec", node, "sh", "-c", "rm -rf "+ateomHostDir+"/*")
+	runQuiet(env, "docker", "exec", node, "sh", "-c", unmount)
+	runQuiet(env, "docker", "exec", node, "sh", "-c", "rm -rf "+ateomHostDir+"/*")
 }
 
-func dockerContainerRunning(name string) bool {
-	out, err := exec.Command("docker", "ps", "--filter", "name="+name, "--format", "{{.Names}}").Output()
+func dockerContainerRunning(name string, env []string) bool {
+	cmd := exec.Command("docker", "ps", "--filter", "name="+name, "--format", "{{.Names}}")
+	cmd.Env = env
+	out, err := cmd.Output()
 	if err != nil {
 		return false
 	}
@@ -535,7 +537,8 @@ func dockerContainerRunning(name string) bool {
 }
 
 // runQuiet runs a best-effort command, discarding its output and status.
-func runQuiet(name string, args ...string) {
+func runQuiet(env []string, name string, args ...string) {
 	cmd := exec.Command(name, args...)
+	cmd.Env = env
 	_ = cmd.Run()
 }

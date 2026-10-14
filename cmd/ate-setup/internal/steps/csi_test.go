@@ -17,8 +17,11 @@ package steps
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 )
@@ -151,5 +154,37 @@ func TestCSIDriverSpellings(t *testing.T) {
 				t.Errorf("csiDrivers[%q].installsNothing() = %v for %+v", tc.driver, got.installsNothing(), got)
 			}
 		})
+	}
+}
+
+func TestCSIDockerCleanupUsesResolvedEnvironment(t *testing.T) {
+	bin := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "docker.log")
+	script := `#!/bin/sh
+printf '%s|%s|%s\n' "$1" "${ATE_NAMESPACE-unset}" "$GITHUB_TOKEN" >> "$CSI_TEST_LOG"
+if [ "$1" = ps ]; then echo kind-node; fi
+`
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CSI_TEST_LOG", capture)
+	t.Setenv("ATE_NAMESPACE", "hostile")
+	t.Setenv("GITHUB_TOKEN", "tool-credential")
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	config.BindFlags(fs)
+	cfg, err := config.LoadFlags(fs, config.LoadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupKindAteomDir("kind-node", cfg.ScriptEnv())
+	got, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "ps|unset|tool-credential\nexec|unset|tool-credential\nexec|unset|tool-credential\n"
+	if string(got) != want {
+		t.Errorf("docker commands saw %q, want %q", got, want)
 	}
 }
