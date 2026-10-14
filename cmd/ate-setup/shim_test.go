@@ -40,6 +40,10 @@ import (
 // stubGo is a `go` that records the arguments of every `go run ./cmd/ate-setup`
 // the script makes, one invocation per line, and succeeds.
 const stubGo = `#!/usr/bin/env bash
+if [[ "$*" == "env GOARCH" ]]; then
+  echo arm64
+  exit 0
+fi
 printf '%s\n' "$*" >> "${SHIM_TEST_LOG}"
 `
 
@@ -47,7 +51,11 @@ printf '%s\n' "$*" >> "${SHIM_TEST_LOG}"
 // invocations and the script's exit status.
 func runShim(t *testing.T, env []string, args ...string) (invocations []string, exitCode int) {
 	t.Helper()
+	return runInstaller(t, "install-ate.sh", repoRoot(t), env, args...)
+}
 
+func runInstaller(t *testing.T, name, dir string, env []string, args ...string) (invocations []string, exitCode int) {
+	t.Helper()
 	root := repoRoot(t)
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(stubGo), 0o755); err != nil {
@@ -55,15 +63,16 @@ func runShim(t *testing.T, env []string, args ...string) (invocations []string, 
 	}
 	log := filepath.Join(t.TempDir(), "invocations")
 
-	script := exec.Command("bash", filepath.Join(root, "hack", "install-ate.sh"))
+	script := exec.Command("bash", filepath.Join(root, "hack", name))
 	script.Args = append(script.Args, args...)
-	script.Dir = root
+	script.Dir = dir
 	// A fixed environment: the script reads SETUP_CSI and STORAGE_CLASS, so a
 	// developer who exports either would otherwise change the expected output.
 	// git needs PATH, and the stub go has to come first on it.
 	script.Env = append([]string{
 		"PATH=" + bin + ":" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
+		"TMPDIR=/tmp",
 		"SHIM_TEST_LOG=" + log,
 	}, env...)
 
@@ -88,6 +97,88 @@ func runShim(t *testing.T, env []string, args ...string) (invocations []string, 
 		}
 	}
 	return invocations, exitCode
+}
+
+func TestKindShimPassesTheKindProfileWithoutOverridingConfig(t *testing.T) {
+	got, code := runInstaller(t, "install-ate-kind.sh", repoRoot(t), []string{
+		"KO_DOCKER_REPO=registry.example/ambient",
+		"KO_DEFAULTPLATFORMS=linux/386",
+		"KUBECTL_CONTEXT=ambient-context",
+		"BUCKET_NAME=ambient-bucket",
+	}, "--deploy-ate-system")
+	if code != 0 || strings.Join(got, "\n") != "run ./cmd/ate-setup --kind deploy ate-system --setup-csi=none" {
+		t.Fatalf("invocations = %q, exit = %d", got, code)
+	}
+}
+
+func TestMicrovmDemoWrappersForwardInstallerFlagsAndKeepHelperSteps(t *testing.T) {
+	for _, name := range []string{"run-microvm-demo.sh", "run-microvm-demo-kind.sh"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			hack := filepath.Join(root, "hack")
+			bin := filepath.Join(root, "bin")
+			for _, dir := range []string{hack, bin} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, script := range []string{"run-microvm-demo.sh", "run-microvm-demo-kind.sh"} {
+				data, err := os.ReadFile(filepath.Join(repoRoot(t), "hack", script))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(hack, script), data, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			log := filepath.Join(root, "calls")
+			writeStub := func(path, body string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("#!/usr/bin/env bash\n"+body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeStub(filepath.Join(bin, "git"), "echo \"${TEST_ROOT}\"\n")
+			writeStub(filepath.Join(bin, "go"), "if [[ \"$*\" == \"env GOARCH\" ]]; then echo arm64; fi\n")
+			writeStub(filepath.Join(hack, "install-ate.sh"), "printf 'ate %s\\n' \"$*\" >> \"${CAPTURE}\"\n")
+			writeStub(filepath.Join(hack, "install-ate-kind.sh"), "printf 'kind %s\\n' \"$*\" >> \"${CAPTURE}\"\n")
+			writeStub(filepath.Join(hack, "install-microvm-deps.sh"), "printf 'deps %s\\n' \"$*\" >> \"${CAPTURE}\"\n")
+			args := []string{"--credential-provider={\"name\":\"k8s.io\"}", "--atenet-dataplane=envoy", "--docker-build-flags=--no-cache"}
+			runArgs := append([]string{filepath.Join(hack, name)}, args...)
+			command := exec.Command("bash", runArgs...)
+			command.Dir = root
+			command.Env = []string{
+				"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
+				"TEST_ROOT=" + root, "CAPTURE=" + log, "NO_DEV_ENV=1",
+				"KO_DOCKER_REPO=localhost:5001", "KUBECTL_CONTEXT=kind-test",
+				"ATE_INSTALL_KIND=" + map[string]string{"run-microvm-demo.sh": "false", "run-microvm-demo-kind.sh": "true"}[name],
+			}
+			out, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("running %s: %v\n%s", name, err, out)
+			}
+			calls, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callText := string(calls)
+			for _, line := range strings.Split(strings.TrimSpace(callText), "\n") {
+				if strings.HasPrefix(line, "ate ") || strings.HasPrefix(line, "kind ") {
+					for _, arg := range args {
+						if !strings.Contains(line, arg) {
+							t.Errorf("installer call %q is missing %q", line, arg)
+						}
+					}
+				}
+			}
+			if !strings.Contains(callText, "--deploy-ate-system") || !strings.Contains(callText, "--deploy-demo-counter-microvm") || !strings.Contains(callText, "deps --install") {
+				t.Errorf("calls = %q; output = %s", calls, out)
+			}
+			if !strings.Contains(string(out), "Demo applied. Next steps:") {
+				t.Errorf("next-step output missing: %s", out)
+			}
+		})
+	}
 }
 
 // goRunPrefix is what the script puts in front of every command line, since it
@@ -211,6 +302,10 @@ func TestShimTranslatesFlags(t *testing.T) {
 		args: []string{"--deploy-atenet", "--atenet-dataplane", "agentgateway"},
 		want: []string{"--atenet-dataplane=agentgateway deploy atenet"},
 	}, {
+		name: "kind config and Docker flags reach every action",
+		args: []string{"--deploy-ate-system", "--kind", "--config", "install.yaml", "--docker-build-flags", "--no-cache"},
+		want: []string{"--kind --config=install.yaml --docker-build-flags=--no-cache deploy ate-system --setup-csi=none"},
+	}, {
 		name: "cluster profile flags are forwarded in either value form",
 		args: []string{"--deploy-ate-system", "--cluster-size", "size10", "--cordon-control-plane"},
 		want: []string{"--cluster-size=size10 --cordon-control-plane deploy ate-system --setup-csi=none"},
@@ -326,7 +421,7 @@ printf '%s\n' "BENCHMARK_ACTOR_MEMORY=${BENCHMARK_ACTOR_MEMORY:-<unset>}"
 	script := exec.Command("bash", filepath.Join(root, "hack", "install-ate.sh"),
 		"--benchmark-actor-memory", "512Mi", "--deploy-benchmarks")
 	script.Dir = root
-	script.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+	script.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "TMPDIR=/tmp"}
 
 	out, err := script.CombinedOutput()
 	if err != nil {

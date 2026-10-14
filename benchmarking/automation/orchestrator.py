@@ -59,10 +59,50 @@ from util import parse_duration_seconds, run, run_no_check
 SUBSTRATE_DIR = "/workspace/substrate"
 TARGET_CLUSTER_DIR = "/etc/orchestrator/target-clusters"
 ENV_FILE_NAME = ".ate-dev-env.sh"
+ATE_CONFIG_FILE_NAME = ".ate-setup-config.yaml"
 MANIFESTS_DIR = "/opt/automation/manifests"
 NAMESPACE = "benchmarking"
 
 TEST_TYPES = tuple(TYPES)
+
+ATE_CONFIG_ENV = {
+    "PROJECT_ID": "gcp.projectID",
+    "CLUSTER_NAME": "gcp.clusterName",
+    "CLUSTER_LOCATION": "gcp.clusterLocation",
+    "KUBECTL_CONTEXT": "context",
+    "KO_DOCKER_REPO": "ko.dockerRepo",
+    "KO_DEFAULTPLATFORMS": "ko.defaultPlatforms",
+    "BUCKET_NAME": "storage.bucketName",
+    "ATE_CREDENTIAL_PROVIDER": "atenet.egress.credentialProvider",
+    "ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE": "atenet.egress.additionalExtprocService",
+    "ATE_ATENET_DATAPLANE": "atenet.dataplane",
+    "ATE_NAMESPACE": "namespace",
+    "EXPECTED_JWT_ISSUER": "ateapi.expectedJWTIssuer",
+    "ACTOR_JWT_ISSUER": "actorJWT.issuer",
+    "ACTOR_JWT_ALGORITHM": "actorJWT.algorithm",
+    "DOCKER_BUILD_FLAGS": "docker.buildFlags",
+    "ATE_IMAGE_REPO": "images.repo",
+    "ATE_IMAGE_TAG": "images.tag",
+    "ATE_API_POSTGRES_READ_WRITE_ROLE": "ateapi.postgres.readWrite.role",
+    "ATE_API_POSTGRES_OWNER_ROLE": "ateapi.postgres.owner.role",
+    "ATE_API_POSTGRES_SCHEMA": "ateapi.postgres.schema",
+    "ATE_API_POSTGRES_POOL_MAX_CONNS": "ateapi.postgres.poolMaxConns",
+    "ATE_API_POSTGRES_SERVER_CA_FILE": "ateapi.postgres.serverCAFile",
+    "ATE_API_POSTGRES_STORAGE_CLASS": "ateapi.postgres.storageClass",
+    "ATE_API_POSTGRES_CLOUDSQL_INSTANCE": "ateapi.postgres.cloudsql.instance",
+    "ATE_API_POSTGRES_CLOUDSQL_GSA": "ateapi.postgres.cloudsql.gsa",
+    "ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH": "ateapi.postgres.cloudsql.iamAuth",
+    "ATE_API_POSTGRES_CLOUDSQL_IP_TYPE": "ateapi.postgres.cloudsql.ipType",
+    "ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER": "podcert.workersPerSigner",
+    "ATE_INSTALL_ROLLOUT_TIMEOUT": "rolloutTimeout",
+    "ATE_INSTALL_CLUSTER_SIZE": "clusterSize",
+    "ATE_INSTALL_CORDON_CONTROL_PLANE": "cordonControlPlane",
+    "ATE_OTLP_ENDPOINT": "otlpEndpoint",
+    "BENCHMARK_ACTOR_MEMORY": "benchmark.actorMemory",
+    "ATE_RECORD_DIR": "record.dir",
+    "ATE_INSTALL_KIND": "kindCluster.enabled",
+    "KIND_CLUSTER_NAME": "kindCluster.name",
+}
 
 # Snapshot the process's initial env so apply_config can return to a known
 # baseline before sourcing the next config (avoids stale vars carrying over
@@ -139,12 +179,32 @@ def apply_target_cluster(
             raise RuntimeError(
                 f"{k} not set after sourcing target cluster {target_cluster!r}"
             )
+    write_ate_config()
+
+
+def write_ate_config() -> Path:
+    config: dict[str, Any] = {
+        "apiVersion": "install.ate.dev/v1alpha1",
+        "kind": "SubstrateInstall",
+    }
+    for name, dotted in ATE_CONFIG_ENV.items():
+        if name not in os.environ:
+            continue
+        node = config
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = os.environ[name]
+    path = Path(SUBSTRATE_DIR) / ATE_CONFIG_FILE_NAME
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return path
 
 
 def clear_target_cluster() -> None:
     dst = Path(SUBSTRATE_DIR) / ENV_FILE_NAME
     if dst.exists():
         dst.unlink()
+    (Path(SUBSTRATE_DIR) / ATE_CONFIG_FILE_NAME).unlink(missing_ok=True)
 
 
 def gcloud_setup_for_target_cluster() -> None:
@@ -322,11 +382,11 @@ def validate_and_normalize_tests(tests: list[dict[str, Any]]) -> None:
 
 
 def deploy_substrate(ate_args: Iterable[str] = ()) -> None:
-    run(["hack/install-ate.sh", "--deploy-ate-system", *(str(a) for a in ate_args)])
+    run(["hack/install-ate.sh", "--config", ATE_CONFIG_FILE_NAME, "--deploy-ate-system", *(str(a) for a in ate_args)])
 
 
 def teardown_substrate() -> None:
-    run_no_check(["hack/install-ate.sh", "--delete-ate-system"])
+    run_no_check(["hack/install-ate.sh", "--config", ATE_CONFIG_FILE_NAME, "--delete-ate-system"])
 
 
 def install_microvm_deps() -> None:

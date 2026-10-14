@@ -86,6 +86,9 @@ usage() {
   echo ""
   echo "  ATE_NO_REPORT_DEFAULTS=1               List only the settings something set in the configuration"
   echo "                                         report, rather than every setting and where it came from."
+  echo "  --config PATH                          Read a configuration document for this invocation."
+  echo "  --kind                                 Apply the local Kind defaults."
+  echo "  --docker-build-flags FLAGS             Pass build flags to the Docker-built dataplane image."
   echo ""
   echo "Overall infrastructure (all infrastructure components):"
   echo ""
@@ -261,6 +264,24 @@ prescan_args=("$@")
 for ((i = 0; i < ${#prescan_args[@]}; i++)); do
   case "${prescan_args[i]}" in
     --atenet-dataplane=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
+    --kind=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
+    --config=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
+    --docker-build-flags=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
+    --kind) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
+    --config)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --config requires a path" >&2
+        exit 1
+      fi
+      GLOBAL_FLAGS+=("--config=${prescan_args[$((i + 1))]}")
+      ;;
+    --docker-build-flags)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --docker-build-flags requires a value" >&2
+        exit 1
+      fi
+      GLOBAL_FLAGS+=("--docker-build-flags=${prescan_args[$((i + 1))]}")
+      ;;
     --atenet-dataplane)
       if (( i + 1 >= ${#prescan_args[@]} )); then
         echo "Error: --atenet-dataplane requires envoy or agentgateway" >&2
@@ -359,11 +380,14 @@ while [[ "$#" -gt 0 ]]; do
     # Captured in the pre-scan above; matched here only so the `*)` branch does
     # not reject them, and so a separated value is consumed with its flag.
     --atenet-dataplane|--podcert-workers-per-signer|--rollout-timeout|--otlp-endpoint) shift ;;
+    --config|--docker-build-flags) shift ;;
+    --kind) ;;
     --cluster-size) shift ;;
     --experimental-additional-egress-extproc-service) shift ;;
     --credential-provider) shift ;;
     --benchmark-worker-count|--benchmark-sandbox-class|--benchmark-actor-memory) shift ;;
     --atenet-dataplane=*|--podcert-workers-per-signer=*|--rollout-timeout=*|--otlp-endpoint=*) ;;
+    --kind=*|--config=*|--docker-build-flags=*) ;;
     --cluster-size=*|--cordon-control-plane|--cordon-control-plane=*) ;;
     --experimental-additional-egress-extproc-service=*) ;;
     --credential-provider=*) ;;

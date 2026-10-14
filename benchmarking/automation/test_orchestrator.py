@@ -15,13 +15,78 @@
 """Unit tests for orchestrator.py: python3 benchmarking/automation/test_orchestrator.py"""
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import yaml
 
 import orchestrator
 from testtypes import locust
+
+
+class AteSetupConfigTest(unittest.TestCase):
+    def test_target_environment_is_written_and_passed_to_installer(self):
+        values = {
+            "PROJECT_ID": "project-a",
+            "CLUSTER_NAME": "cluster-a",
+            "CLUSTER_LOCATION": "zone-a",
+            "KUBECTL_CONTEXT": "gke_project-a_zone-a_cluster-a",
+            "KO_DOCKER_REPO": "gcr.io/project-a/ate",
+            "KO_DEFAULTPLATFORMS": "linux/amd64",
+            "BUCKET_NAME": "snapshots-a",
+            "ATE_CREDENTIAL_PROVIDER": '{"name":"k8s.io"}',
+            "ATE_ATENET_DATAPLANE": "envoy",
+            "ATE_API_POSTGRES_CLOUDSQL_INSTANCE": "project-a:zone-a:db-a",
+            "ATE_API_POSTGRES_CLOUDSQL_GSA": "db@project-a.iam.gserviceaccount.com",
+            "ATE_API_POSTGRES_CLOUDSQL_IAM_AUTH": "true",
+            "ATE_API_POSTGRES_CLOUDSQL_IP_TYPE": "private",
+            "BENCHMARK_ACTOR_MEMORY": "512Mi",
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            orchestrator, "SUBSTRATE_DIR", tmp
+        ), mock.patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True):
+            target_dir = Path(tmp, "targets")
+            target_dir.mkdir()
+            (target_dir / "target.sh").write_text(
+                "\n".join(f"export {name}='{value}'" for name, value in values.items()),
+                encoding="utf-8",
+            )
+            orchestrator.apply_target_cluster("target", str(target_dir))
+
+            config_path = Path(tmp, orchestrator.ATE_CONFIG_FILE_NAME)
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(config["gcp"], {
+                "projectID": "project-a", "clusterName": "cluster-a", "clusterLocation": "zone-a"
+            })
+            self.assertEqual(config["ko"], {
+                "dockerRepo": "gcr.io/project-a/ate", "defaultPlatforms": "linux/amd64"
+            })
+            self.assertEqual(config["ateapi"]["postgres"]["cloudsql"], {
+                "instance": "project-a:zone-a:db-a",
+                "gsa": "db@project-a.iam.gserviceaccount.com",
+                "iamAuth": "true",
+                "ipType": "private",
+            })
+            self.assertEqual(config["benchmark"]["actorMemory"], "512Mi")
+            self.assertEqual(config["atenet"]["egress"]["credentialProvider"], '{"name":"k8s.io"}')
+            self.assertEqual(config["atenet"]["dataplane"], "envoy")
+            with mock.patch.object(orchestrator, "run") as run, mock.patch.object(
+                orchestrator, "run_no_check"
+            ) as run_no_check:
+                orchestrator.deploy_substrate()
+                orchestrator.teardown_substrate()
+                self.assertEqual(run.call_args.args[0], [
+                    "hack/install-ate.sh", "--config", orchestrator.ATE_CONFIG_FILE_NAME,
+                    "--deploy-ate-system",
+                ])
+                self.assertEqual(run_no_check.call_args.args[0], [
+                    "hack/install-ate.sh", "--config", orchestrator.ATE_CONFIG_FILE_NAME,
+                    "--delete-ate-system",
+                ])
+            orchestrator.clear_target_cluster()
+            self.assertFalse(config_path.exists())
 
 
 class DeployWorkloadsTest(unittest.TestCase):
