@@ -63,6 +63,11 @@ const (
 	maxGRPCStreams            = 16
 	maxGRPCBidiCount          = 1000
 	maxGRPCTimeout            = 4 * time.Minute
+	// The per-field limits multiply across streams and counts, so a bidi request
+	// is also bounded as a whole: responses collected for the answer, and bytes
+	// moved in each direction.
+	maxGRPCTotalResponses = 4096
+	maxGRPCTotalBytes     = 256 << 20
 	// How long to wait for the server to record how a canceled stream ended.
 	grpcOutcomeWait         = 5 * time.Second
 	grpcOutcomePollInterval = 100 * time.Millisecond
@@ -1037,8 +1042,15 @@ func bidiStream(ctx context.Context, client grpcechopb.EchoClient, input grpcReq
 		}
 		if input.CancelAfter != nil && len(out) == int(*input.CancelAfter) {
 			cancel()
-			_, err := stream.Recv()
-			return err
+			// grpc-go delivers responses it already buffered before it reports
+			// the cancel, so drain to the terminal status and discard them.
+			// Returning on the first Recv could hand back a nil error and let
+			// the caller keep collecting past CancelAfter.
+			for {
+				if _, err := stream.Recv(); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}
@@ -1122,7 +1134,9 @@ func bidiMessage(response *grpcechopb.EchoResponse, input grpcRequest) streamedM
 	if input.PayloadBytes > 0 || input.ReplyBytes > 0 {
 		message = strings.TrimRight(message, ".")
 	}
-	return streamedMessage{Message: message, Index: response.GetIndex(), Size: size}
+	// Clone: the trimmed string would otherwise keep the whole padded response
+	// alive for as long as the answer is being built.
+	return streamedMessage{Message: strings.Clone(message), Index: response.GetIndex(), Size: size}
 }
 
 // writeGRPCFailure reports a failed RPC. The HTTP status is 502 so that a
@@ -1216,6 +1230,18 @@ func validateGRPCRequest(input grpcRequest) error {
 	}
 	if input.AfterCloseCount < 0 || input.AfterCloseCount > grpcecho.MaxStreamCount {
 		return fmt.Errorf("afterCloseCount must be between 0 and %d, got %d", grpcecho.MaxStreamCount, input.AfterCloseCount)
+	}
+	streams := max(int64(input.Streams), 1)
+	responses := streams * int64(input.BidiCount+input.AfterCloseCount)
+	if responses > maxGRPCTotalResponses {
+		return fmt.Errorf("streams x (bidiCount + afterCloseCount) must be at most %d responses, got %d", maxGRPCTotalResponses, responses)
+	}
+	// A response echoes the request, so it is as large as the larger of the two
+	// pad sizes.
+	sentBytes := streams * int64(input.BidiCount) * int64(input.PayloadBytes)
+	receivedBytes := responses * int64(max(input.PayloadBytes, input.ReplyBytes))
+	if sentBytes > maxGRPCTotalBytes || receivedBytes > maxGRPCTotalBytes {
+		return fmt.Errorf("payloads must move at most %d bytes in each direction, got %d sent and %d received", maxGRPCTotalBytes, sentBytes, receivedBytes)
 	}
 	if input.TimeoutMs < 0 || time.Duration(input.TimeoutMs)*time.Millisecond > maxGRPCTimeout {
 		return fmt.Errorf("timeoutMs must be between 0 and %d, got %d", maxGRPCTimeout.Milliseconds(), input.TimeoutMs)

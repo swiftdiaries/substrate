@@ -652,6 +652,29 @@ func TestGRPCBidiCancelReachesServer(t *testing.T) {
 	}
 }
 
+// With sends and receives overlapping, responses are already buffered when the
+// cancel lands. They must be discarded: the answer holds exactly the responses
+// read before the cancel, with no gap and nothing past it.
+func TestGRPCBidiConcurrentCancelDiscardsBufferedResponses(t *testing.T) {
+	target := startEchoServer(t)
+
+	for range 20 {
+		recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"c","bidiMode":"concurrent","bidiCount":200,"cancelAfter":2,"expectCode":"Canceled"}`, target))
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+		}
+		if len(got.Bidi) != 2 {
+			t.Fatalf("got %d responses, want exactly 2: %+v", len(got.Bidi), got.Bidi)
+		}
+		for i, response := range got.Bidi {
+			if int(response.Index) != i {
+				t.Errorf("response %d has index %d, want %d", i, response.Index, i)
+			}
+		}
+	}
+}
+
 // Payloads past the old 64 KiB frame size must arrive whole in both
 // directions, and each message must report the size it arrived at.
 func TestGRPCBidiLargePayload(t *testing.T) {
@@ -846,6 +869,9 @@ func TestGRPCInvalidRequests(t *testing.T) {
 		{name: "streams over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"streams":17}`, status: http.StatusBadRequest},
 		{name: "payloadBytes without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","payloadBytes":1}`, status: http.StatusBadRequest},
 		{name: "payloadBytes over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"payloadBytes":2097153}`, status: http.StatusBadRequest},
+		{name: "too many responses across streams", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1000,"afterCloseCount":1000,"streams":16}`, status: http.StatusBadRequest},
+		{name: "too many reply bytes in total", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1000,"replyBytes":2097152}`, status: http.StatusBadRequest},
+		{name: "too many sent bytes in total", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":200,"payloadBytes":2097152}`, status: http.StatusBadRequest},
 		{name: "replyBytes over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"replyBytes":2097153}`, status: http.StatusBadRequest},
 		{name: "afterCloseCount without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","afterCloseCount":1}`, status: http.StatusBadRequest},
 		{name: "afterCloseCount over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"afterCloseCount":1001}`, status: http.StatusBadRequest},
