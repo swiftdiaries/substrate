@@ -17,7 +17,7 @@
 // backs all of them and a new origin-style test adds a subcommand here rather
 // than a new image to build and push:
 //
-//	testserver grpc  --listen=:50051   a cleartext HTTP/2 gRPC echo origin
+//	testserver grpc  --listen=:50051   a cleartext HTTP/2 gRPC echo origin, plus TLS (ALPN h2) on :8443 given --tls-cert/--tls-key
 //	testserver http  --listen=:8080    an HTTP(S) origin serving /healthz, /echoheaders, POST /fetch and /dial
 //	testserver egressprobe --listen=:8080  a client that drives the egress gateway
 //	testserver websocket --listen=:8080  a websocket server that responds to PINGs

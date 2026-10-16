@@ -33,15 +33,20 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	grpcstatus "google.golang.org/grpc/status"
 
+	"go.ate.dev/substrate/internal/grpcecho"
 	"go.ate.dev/substrate/internal/proto/grpcechopb"
 )
 
@@ -55,6 +60,12 @@ const (
 	maxWebSocketHandshakeBody = 4 << 10
 	muxRequestCount           = 250
 	muxBodySize               = 64
+	maxGRPCStreams            = 16
+	maxGRPCBidiCount          = 1000
+	maxGRPCTimeout            = 4 * time.Minute
+	// How long to wait for the server to record how a canceled stream ended.
+	grpcOutcomeWait         = 5 * time.Second
+	grpcOutcomePollInterval = 100 * time.Millisecond
 	// Keep connection around longer than ext_proc cache freshness (10s)
 	postBodyDelay   = 15 * time.Second
 	slowHeaderDelay = 5 * time.Second
@@ -96,28 +107,72 @@ type websocketResponse struct {
 }
 
 // grpcRequest asks for one unary Echo against target, and additionally for a
-// server-stream or a bidirectional stream when the matching count is positive.
+// server-stream or bidirectional streams when the matching count is positive.
+// The bidi fields shape those streams and are rejected unless bidiCount is set.
 type grpcRequest struct {
-	// Target is the gRPC server to dial, as host:port. Cleartext HTTP/2: the
-	// point of the demo is that the actor speaks plainly and the egress path
-	// carries it, so there is nothing here to configure TLS with.
-	Target      string `json:"target"`
-	Message     string `json:"message"`
+	// Target is the gRPC server to dial, as host:port. The dial is cleartext
+	// HTTP/2 unless TLS is set.
+	Target  string `json:"target"`
+	Message string `json:"message"`
+	// TLS dials with TLS 1.2 or later, verifying the server against the system
+	// roots.
+	TLS bool `json:"tls,omitempty"`
+	// RootCA is a PEM bundle that replaces the system roots for the TLS dial.
+	// It is for tests and needs TLS.
+	RootCA      string `json:"rootCA,omitempty"`
 	StreamCount int32  `json:"streamCount,omitempty"`
-	// BidiCount is how many messages to send over a bidirectional stream,
-	// one at a time, each awaiting its response before the next goes out.
+	// BidiCount is how many messages each bidirectional stream sends.
 	BidiCount int32 `json:"bidiCount,omitempty"`
+	// BidiMode is "lockstep" (the default), sending each message after the
+	// previous response, or "concurrent", sending them all back to back.
+	BidiMode string `json:"bidiMode,omitempty"`
+	// Streams is how many bidirectional streams to run over the one connection.
+	Streams int32 `json:"streams,omitempty"`
+	// PayloadBytes pads each sent message with '.' to this size.
+	PayloadBytes int32 `json:"payloadBytes,omitempty"`
+	// ReplyBytes pads each response message to this size.
+	ReplyBytes int32 `json:"replyBytes,omitempty"`
+	// AfterCloseCount is how many responses the server sends after the client
+	// half-closes, which this request expects to receive.
+	AfterCloseCount int32 `json:"afterCloseCount,omitempty"`
+	// FailAfter ends the stream with FailCode after this many responses.
+	FailAfter *int32 `json:"failAfter,omitempty"`
+	// FailCode is the codes.Code name to fail with, such as "FailedPrecondition".
+	FailCode string `json:"failCode,omitempty"`
+	// CancelAfter cancels the client side of the stream after this many
+	// responses, then records how the server saw the stream end.
+	CancelAfter *int32 `json:"cancelAfter,omitempty"`
+	// ExpectCode is the gRPC code the bidi phase should end with. The response
+	// is 200 when it does and 502 when it does not. Defaults to "OK".
+	ExpectCode string `json:"expectCode,omitempty"`
+	// IdleAfter pauses the server for IdleMs after this many responses.
+	IdleAfter *int32 `json:"idleAfter,omitempty"`
+	// IdleMs is the pause IdleAfter asks for, in milliseconds.
+	IdleMs int32 `json:"idleMs,omitempty"`
+	// TimeoutMs overrides the request timeout, in milliseconds.
+	TimeoutMs int32 `json:"timeoutMs,omitempty"`
 }
 
 type grpcResponse struct {
 	// Message is what the unary Echo returned.
 	Message string `json:"message"`
+	// TLS reports whether the unary Echo ran over TLS.
+	TLS bool `json:"tls"`
+	// ServerCertIssuer is the issuer of the leaf certificate the server presented
+	// over TLS. Empty when TLS was not used.
+	ServerCertIssuer string `json:"serverCertIssuer,omitempty"`
 	// Stream is what EchoStream returned, in the order it arrived. Absent when
 	// the request did not ask for a stream.
 	Stream []streamedMessage `json:"stream,omitempty"`
 	// Bidi is what EchoBidi returned, in the order it arrived. Absent when the
-	// request did not ask for one.
+	// request did not ask for one, or asked for several streams.
 	Bidi []streamedMessage `json:"bidi,omitempty"`
+	// BidiStreams holds what each of several EchoBidi streams returned, indexed
+	// by stream. Present only when the request asked for more than one stream.
+	BidiStreams [][]streamedMessage `json:"bidiStreams,omitempty"`
+	// ServerOutcome is how the server recorded a canceled stream as ending,
+	// such as "canceled". Empty unless the request canceled a stream.
+	ServerOutcome string `json:"serverOutcome,omitempty"`
 	// Code is the gRPC status of the last RPC attempted, as a string. It is the
 	// one field an HTTP status cannot stand in for: a gRPC status travels in
 	// trailers, after the response body, so a path that drops trailers or
@@ -129,6 +184,9 @@ type grpcResponse struct {
 type streamedMessage struct {
 	Message string `json:"message"`
 	Index   int32  `json:"index"`
+	// Size is the length of the message as received, before any trimming of
+	// its padding.
+	Size int `json:"size"`
 }
 
 func main() {
@@ -725,9 +783,6 @@ func performWebSocket(ctx context.Context, input websocketRequest) (websocketRes
 	return response, nil
 }
 
-// handleGRPC dials the requested target and echoes back what the RPCs returned.
-// It exists so an e2e can assert that gRPC survives the egress path: HTTP/2
-// framing end to end, and a status delivered in trailers.
 func handleGRPC(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -745,8 +800,30 @@ func handleGRPC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, grpcResponse{Error: err.Error()})
 		return
 	}
+	if err := validateGRPCRequest(input); err != nil {
+		writeJSON(w, http.StatusBadRequest, grpcResponse{Error: err.Error()})
+		return
+	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	creds := insecure.NewCredentials()
+	if input.TLS {
+		// A nil pool makes the dial verify against the system roots.
+		var pool *x509.CertPool
+		if input.RootCA != "" {
+			pool = x509.NewCertPool()
+			if !pool.AppendCertsFromPEM([]byte(input.RootCA)) {
+				writeJSON(w, http.StatusBadRequest, grpcResponse{Error: "rootCA does not contain a valid certificate"})
+				return
+			}
+		}
+		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool})
+	}
+
+	timeout := requestTimeout
+	if input.TimeoutMs > 0 {
+		timeout = time.Duration(input.TimeoutMs) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
 	// Dialed per request and closed with it. The actor this runs inside is
@@ -754,7 +831,7 @@ func handleGRPC(w http.ResponseWriter, r *http.Request) {
 	// snapshot does not survive one: the peer is long gone by the time the
 	// actor resumes, and every RPC on it would fail in a way that looks like a
 	// broken gateway.
-	conn, err := grpc.NewClient(input.Target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(input.Target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, grpcResponse{Error: fmt.Sprintf("dialing %s: %v", input.Target, err)})
 		return
@@ -762,13 +839,18 @@ func handleGRPC(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	client := grpcechopb.NewEchoClient(conn)
-	echoed, err := client.Echo(ctx, &grpcechopb.EchoRequest{Message: input.Message})
+	var echoPeer peer.Peer
+	echoed, err := client.Echo(ctx, &grpcechopb.EchoRequest{Message: input.Message}, grpc.Peer(&echoPeer))
 	if err != nil {
 		writeGRPCFailure(w, "Echo", err)
 		return
 	}
 
 	response := grpcResponse{Message: echoed.GetMessage(), Code: codes.OK.String()}
+	if info, ok := echoPeer.AuthInfo.(credentials.TLSInfo); ok && len(info.State.PeerCertificates) > 0 {
+		response.TLS = true
+		response.ServerCertIssuer = info.State.PeerCertificates[0].Issuer.String()
+	}
 	if input.StreamCount > 0 {
 		response.Stream, err = echoStream(ctx, client, input)
 		if err != nil {
@@ -776,14 +858,31 @@ func handleGRPC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if input.BidiCount > 0 {
-		response.Bidi, err = echoBidi(ctx, client, input)
-		if err != nil {
-			writeGRPCFailure(w, "EchoBidi", err)
-			return
-		}
+	if input.BidiCount == 0 {
+		writeJSON(w, http.StatusOK, response)
+		return
 	}
-	writeJSON(w, http.StatusOK, response)
+
+	// The bidi phase reports its own code and returns partial results with it,
+	// so the status answers whether that code is the one the caller expected.
+	single, multi, outcome, err := runBidi(ctx, client, input)
+	response.Bidi = single
+	response.BidiStreams = multi
+	response.ServerOutcome = outcome
+	response.Code = codes.OK.String()
+	if err != nil {
+		response.Code = grpcstatus.Code(err).String()
+		response.Error = "EchoBidi failed: " + err.Error()
+	}
+	expected := input.ExpectCode
+	if expected == "" {
+		expected = codes.OK.String()
+	}
+	status := http.StatusBadGateway
+	if response.Code == expected {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, response)
 }
 
 // echoStream drains a server-stream into the response's Stream field.
@@ -801,54 +900,229 @@ func echoStream(ctx context.Context, client grpcechopb.EchoClient, input grpcReq
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, streamedMessage{Message: received.GetMessage(), Index: received.GetIndex()})
+		out = append(out, streamedMessage{Message: received.GetMessage(), Index: received.GetIndex(), Size: len(received.GetMessage())})
 	}
 }
 
-// echoBidi runs a bidirectional stream, sending BidiCount messages one at a
-// time and waiting for each response before sending the next. That ordering is
-// the whole point: sending everything and then reading it back would succeed
-// over a path that carries one direction at a time, which is precisely the
-// failure this endpoint exists to catch.
-func echoBidi(ctx context.Context, client grpcechopb.EchoClient, input grpcRequest) ([]streamedMessage, error) {
-	stream, err := client.EchoBidi(ctx)
+// runBidi runs the bidirectional phase: one stream, or input.Streams streams
+// over the same connection. It returns the single stream's messages, or one
+// entry per stream in multi. A canceled stream also reports how the server
+// recorded its end.
+func runBidi(ctx context.Context, client grpcechopb.EchoClient, input grpcRequest) (single []streamedMessage, multi [][]streamedMessage, outcome string, err error) {
+	var streamID string
+	if input.CancelAfter != nil {
+		streamID = strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	bidiCtx := bidiMetadata(ctx, input, streamID)
+
+	if input.Streams <= 1 {
+		single, err = bidiStream(bidiCtx, client, input, input.Message)
+	} else {
+		multi = make([][]streamedMessage, input.Streams)
+		errs := make([]error, input.Streams)
+		var wg sync.WaitGroup
+		for k := range input.Streams {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				multi[k], errs[k] = bidiStream(bidiCtx, client, input, fmt.Sprintf("%s-s%d", input.Message, k))
+			}()
+		}
+		wg.Wait()
+		for _, streamErr := range errs {
+			if streamErr != nil {
+				err = streamErr
+				break
+			}
+		}
+	}
+
+	if streamID == "" {
+		return single, multi, "", err
+	}
+	// The server records the outcome when its handler returns, which can be
+	// after the client has seen the cancel, so poll for it.
+	outcome, outcomeErr := awaitOutcome(ctx, client, streamID)
+	if err == nil {
+		err = outcomeErr
+	}
+	return single, multi, outcome, err
+}
+
+// bidiMetadata returns ctx with the server controls for input's bidi streams
+// attached as outgoing metadata. streamID is empty unless the stream is to be
+// recorded under that ID.
+func bidiMetadata(ctx context.Context, input grpcRequest, streamID string) context.Context {
+	var kv []string
+	if input.FailAfter != nil {
+		// The code is validated by validateGRPCRequest.
+		code, _ := parseCode(input.FailCode)
+		kv = append(kv, grpcecho.FailAfterKey, strconv.Itoa(int(*input.FailAfter)),
+			grpcecho.FailCodeKey, strconv.Itoa(int(code)))
+	}
+	if input.IdleAfter != nil {
+		kv = append(kv, grpcecho.IdleAfterKey, strconv.Itoa(int(*input.IdleAfter)),
+			grpcecho.IdleMsKey, strconv.Itoa(int(input.IdleMs)))
+	}
+	if input.ReplyBytes > 0 {
+		kv = append(kv, grpcecho.ReplyBytesKey, strconv.Itoa(int(input.ReplyBytes)))
+	}
+	if input.AfterCloseCount > 0 {
+		kv = append(kv, grpcecho.AfterCloseCountKey, strconv.Itoa(int(input.AfterCloseCount)))
+	}
+	if streamID != "" {
+		kv = append(kv, grpcecho.StreamIDKey, streamID)
+	}
+	if len(kv) == 0 {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, kv...)
+}
+
+// awaitOutcome asks the server, by unary Echo, how the stream with streamID
+// ended. It returns an empty string, and no error, if the server has not
+// recorded an outcome within grpcOutcomeWait.
+func awaitOutcome(ctx context.Context, client grpcechopb.EchoClient, streamID string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, grpcOutcomeWait)
+	defer cancel()
+	for {
+		lookup := metadata.AppendToOutgoingContext(ctx, grpcecho.OutcomeOfKey, streamID)
+		response, err := client.Echo(lookup, &grpcechopb.EchoRequest{})
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", nil
+			}
+			return "", fmt.Errorf("looking up outcome of stream %s: %w", streamID, err)
+		}
+		if message := response.GetMessage(); message != "" {
+			return message, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", nil
+		case <-time.After(grpcOutcomePollInterval):
+		}
+	}
+}
+
+// bidiStream runs one bidirectional stream whose messages begin with prefix.
+// It returns the messages received so far along with any error, so a failed
+// stream still reports what it got.
+func bidiStream(ctx context.Context, client grpcechopb.EchoClient, input grpcRequest, prefix string) ([]streamedMessage, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := client.EchoBidi(streamCtx)
 	if err != nil {
 		return nil, err
 	}
 
-	out := make([]streamedMessage, 0, input.BidiCount)
+	want := int(input.BidiCount + input.AfterCloseCount)
+	var out []streamedMessage
+	send := func(i int32) error {
+		// A distinct message per send, so a path that replays or holds on to a
+		// buffered frame shows up as a mismatch rather than as a pass.
+		message := grpcecho.Pad(fmt.Sprintf("%s-%d", prefix, i), int(input.PayloadBytes))
+		return stream.Send(&grpcechopb.EchoRequest{Message: message})
+	}
+	// receive appends the next response to out. Once CancelAfter responses are
+	// in, it cancels the stream and returns the error the cancel produces.
+	receive := func() error {
+		response, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		out = append(out, bidiMessage(response, input))
+		if len(out) > want {
+			return fmt.Errorf("server sent more responses than the %d requested", want)
+		}
+		if input.CancelAfter != nil && len(out) == int(*input.CancelAfter) {
+			cancel()
+			_, err := stream.Recv()
+			return err
+		}
+		return nil
+	}
+
+	if input.BidiMode == "concurrent" {
+		err := bidiConcurrent(stream, cancel, send, receive, input.BidiCount)
+		return out, err
+	}
+
+	// Lockstep: each message goes out only after the previous response is in.
 	for i := range input.BidiCount {
-		// A distinct message per iteration, so a path that replays or holds on
-		// to a buffered frame shows up as a mismatch rather than as a pass.
-		message := fmt.Sprintf("%s-%d", input.Message, i)
-		if err := stream.Send(&grpcechopb.EchoRequest{Message: message}); err != nil {
+		if err := send(i); err != nil {
 			// grpc-go reports a broken stream from Send as io.EOF and puts the
 			// real status on Recv, which is the code worth reporting.
 			if _, recvErr := stream.Recv(); recvErr != nil {
-				return nil, recvErr
+				return out, recvErr
 			}
-			return nil, err
+			return out, err
 		}
-		received, err := stream.Recv()
-		if err != nil {
-			return nil, err
+		if err := receive(); err != nil {
+			return out, err
 		}
-		out = append(out, streamedMessage{Message: received.GetMessage(), Index: received.GetIndex()})
 	}
 
 	// Half-close the request direction while the response direction is still
 	// open, then drain it. A path that reads a one-directional END_STREAM as a
 	// teardown fails here and nowhere else.
 	if err := stream.CloseSend(); err != nil {
-		return nil, err
+		return out, err
 	}
-	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return nil, fmt.Errorf("server sent more responses than the %d messages requested", input.BidiCount)
+	for {
+		err := receive()
+		if errors.Is(err, io.EOF) {
+			return out, nil
 		}
-		return nil, err
+		if err != nil {
+			return out, err
+		}
 	}
-	return out, nil
+}
+
+// bidiConcurrent sends every message back to back while the caller receives.
+// It waits for the sender before returning, so no goroutine outlives the
+// stream.
+func bidiConcurrent(stream grpc.BidiStreamingClient[grpcechopb.EchoRequest, grpcechopb.EchoResponse], cancel context.CancelFunc, send func(int32) error, receive func() error, bidiCount int32) error {
+	sent := make(chan error, 1)
+	go func() {
+		for i := range bidiCount {
+			if err := send(i); err != nil {
+				sent <- err
+				return
+			}
+		}
+		sent <- stream.CloseSend()
+	}()
+
+	var err error
+	for {
+		if err = receive(); err != nil {
+			break
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	if err != nil {
+		// Unblock a sender that is waiting on flow control.
+		cancel()
+	}
+	if sendErr := <-sent; err == nil {
+		err = sendErr
+	}
+	return err
+}
+
+// bidiMessage records a response. The padding is trimmed when it was asked
+// for, so the message reads as the one that was sent.
+func bidiMessage(response *grpcechopb.EchoResponse, input grpcRequest) streamedMessage {
+	message := response.GetMessage()
+	size := len(message)
+	if input.PayloadBytes > 0 || input.ReplyBytes > 0 {
+		message = strings.TrimRight(message, ".")
+	}
+	return streamedMessage{Message: message, Index: response.GetIndex(), Size: size}
 }
 
 // writeGRPCFailure reports a failed RPC. The HTTP status is 502 so that a
@@ -893,6 +1167,127 @@ func validateTarget(raw string) error {
 		return fmt.Errorf("target port must be a number between 1 and 65535, got %q", port)
 	}
 	return nil
+}
+
+// validateGRPCRequest checks the bidi and timeout knobs. Each rule fails the
+// request with 400 rather than falling back to a default, so a caller that
+// asks for something the endpoint cannot do sees why.
+func validateGRPCRequest(input grpcRequest) error {
+	if input.RootCA != "" && !input.TLS {
+		return errors.New("rootCA requires tls")
+	}
+	switch input.BidiMode {
+	case "", "lockstep", "concurrent":
+	default:
+		return fmt.Errorf("bidiMode must be lockstep or concurrent, got %q", input.BidiMode)
+	}
+	if input.BidiCount < 0 || input.BidiCount > maxGRPCBidiCount {
+		return fmt.Errorf("bidiCount must be between 0 and %d, got %d", maxGRPCBidiCount, input.BidiCount)
+	}
+
+	bidiOnly := []struct {
+		name string
+		set  bool
+	}{
+		{"bidiMode", input.BidiMode != ""},
+		{"streams", input.Streams != 0},
+		{"payloadBytes", input.PayloadBytes != 0},
+		{"replyBytes", input.ReplyBytes != 0},
+		{"afterCloseCount", input.AfterCloseCount != 0},
+		{"failAfter", input.FailAfter != nil},
+		{"cancelAfter", input.CancelAfter != nil},
+		{"expectCode", input.ExpectCode != ""},
+		{"idleAfter", input.IdleAfter != nil},
+	}
+	for _, field := range bidiOnly {
+		if field.set && input.BidiCount == 0 {
+			return fmt.Errorf("%s requires bidiCount", field.name)
+		}
+	}
+
+	if input.Streams < 0 || input.Streams > maxGRPCStreams {
+		return fmt.Errorf("streams must be between 0 and %d, got %d", maxGRPCStreams, input.Streams)
+	}
+	if input.PayloadBytes < 0 || input.PayloadBytes > grpcecho.MaxPayloadBytes {
+		return fmt.Errorf("payloadBytes must be between 0 and %d, got %d", grpcecho.MaxPayloadBytes, input.PayloadBytes)
+	}
+	if input.ReplyBytes < 0 || input.ReplyBytes > grpcecho.MaxPayloadBytes {
+		return fmt.Errorf("replyBytes must be between 0 and %d, got %d", grpcecho.MaxPayloadBytes, input.ReplyBytes)
+	}
+	if input.AfterCloseCount < 0 || input.AfterCloseCount > grpcecho.MaxStreamCount {
+		return fmt.Errorf("afterCloseCount must be between 0 and %d, got %d", grpcecho.MaxStreamCount, input.AfterCloseCount)
+	}
+	if input.TimeoutMs < 0 || time.Duration(input.TimeoutMs)*time.Millisecond > maxGRPCTimeout {
+		return fmt.Errorf("timeoutMs must be between 0 and %d, got %d", maxGRPCTimeout.Milliseconds(), input.TimeoutMs)
+	}
+	timeout := requestTimeout
+	if input.TimeoutMs > 0 {
+		timeout = time.Duration(input.TimeoutMs) * time.Millisecond
+	}
+
+	if (input.FailAfter != nil) != (input.FailCode != "") {
+		return errors.New("failAfter and failCode must be given together")
+	}
+	if input.FailAfter != nil {
+		if *input.FailAfter < 0 {
+			return fmt.Errorf("failAfter must be at least 0, got %d", *input.FailAfter)
+		}
+		code, ok := parseCode(input.FailCode)
+		if !ok {
+			return fmt.Errorf("failCode %q is not a gRPC code", input.FailCode)
+		}
+		if code == codes.OK {
+			return errors.New("failCode must not be OK")
+		}
+	}
+
+	if input.CancelAfter != nil {
+		if limit := input.BidiCount + input.AfterCloseCount; *input.CancelAfter < 1 || *input.CancelAfter > limit {
+			return fmt.Errorf("cancelAfter must be between 1 and %d, got %d", limit, *input.CancelAfter)
+		}
+		if input.FailAfter != nil {
+			return errors.New("cancelAfter and failAfter are mutually exclusive")
+		}
+		if input.Streams > 1 {
+			return errors.New("cancelAfter requires streams of at most 1")
+		}
+	}
+
+	if input.IdleAfter != nil || input.IdleMs != 0 {
+		if (input.IdleAfter != nil) != (input.IdleMs != 0) {
+			return errors.New("idleAfter and idleMs must be given together")
+		}
+		if *input.IdleAfter < 1 {
+			return fmt.Errorf("idleAfter must be at least 1, got %d", *input.IdleAfter)
+		}
+		if input.IdleMs < 1 {
+			return fmt.Errorf("idleMs must be at least 1, got %d", input.IdleMs)
+		}
+		if time.Duration(input.IdleMs)*time.Millisecond >= timeout {
+			return fmt.Errorf("idleMs must be below the %v timeout, got %d", timeout, input.IdleMs)
+		}
+	}
+
+	if input.ExpectCode != "" {
+		if _, ok := parseCode(input.ExpectCode); !ok {
+			return fmt.Errorf("expectCode %q is not a gRPC code", input.ExpectCode)
+		}
+	}
+
+	if (input.PayloadBytes > 0 || input.ReplyBytes > 0) && strings.Contains(input.Message, ".") {
+		return errors.New("message must not contain '.' when payloadBytes or replyBytes is set, because padding is trimmed")
+	}
+	return nil
+}
+
+// parseCode returns the gRPC code whose String form is name.
+func parseCode(name string) (codes.Code, bool) {
+	for code := codes.Code(0); code <= codes.Code(16); code++ {
+		if code.String() == name {
+			return code, true
+		}
+	}
+	return codes.Code(0), false
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, response any) {

@@ -64,10 +64,11 @@ type ServerPod struct {
 	// publish a port the container -- uid 65532, every capability dropped --
 	// cannot bind, such as 80; the Service maps Port down to it.
 	TargetPort int
-	// TLSPort, when set, publishes the HTTPS listener testserver's http and
-	// websocket subcommands open on container port 8443 when given a
+	// TLSPort, when set, publishes the HTTPS listener testserver's http,
+	// websocket and grpc subcommands open on container port 8443 when given a
 	// certificate, beside the cleartext one on Port. The readiness probe then
-	// checks HTTPS, the listener that needs the certificate.
+	// checks HTTPS, the listener that needs the certificate. With GRPCProbe the
+	// probe stays cleartext gRPC on Port, whatever TLSPort is set to.
 	TLSPort int
 	// Namespace deploys into an existing namespace instead of a fresh one, for
 	// a suite that has to populate that namespace first: credentials the pod
@@ -99,7 +100,7 @@ const serviceDNSBundle = "/run/servicedns.podcert.ate.dev/credential-bundle.pem"
 // ServiceDNSTLS returns spec serving HTTPS as well as HTTP, with a certificate
 // from the cluster's service-DNS signer that covers only Server.SvcName.
 // Unless spec sets them, HTTP is on port 80 and HTTPS on 443. The server must
-// be testserver's http or websocket subcommand.
+// be testserver's http, websocket or grpc subcommand.
 func ServiceDNSTLS(spec ServerPod) ServerPod {
 	if spec.Port == 0 {
 		spec.Port, spec.TargetPort = 80, 8080

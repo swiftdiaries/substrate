@@ -16,7 +16,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -33,8 +32,9 @@ import (
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 
-	"go.ate.dev/substrate/internal/proto/grpcechopb"
+	"go.ate.dev/substrate/internal/grpcecho"
 	"go.ate.dev/substrate/internal/testcert"
 )
 
@@ -439,44 +439,8 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 // the egress tunnel, so these tests pin its answers against a loopback server,
 // where there is no tunnel to blame.
 
-// echoServer is the in-process stand-in for the egress e2e gRPC origin
-// (internal/e2e/fixtures/testserver, its grpc subcommand).
-type echoServer struct {
-	grpcechopb.UnimplementedEchoServer
-}
-
-func (echoServer) Echo(_ context.Context, req *grpcechopb.EchoRequest) (*grpcechopb.EchoResponse, error) {
-	return &grpcechopb.EchoResponse{Message: req.GetMessage()}, nil
-}
-
-func (echoServer) EchoStream(req *grpcechopb.EchoStreamRequest, stream grpc.ServerStreamingServer[grpcechopb.EchoResponse]) error {
-	for i := range req.GetCount() {
-		if err := stream.Send(&grpcechopb.EchoResponse{Message: req.GetMessage(), Index: i}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// EchoBidi answers each request as it arrives, like the fixture: the handler
-// under test sends one message at a time and blocks on its response, so a
-// stand-in that drained the request direction first would deadlock.
-func (echoServer) EchoBidi(stream grpc.BidiStreamingServer[grpcechopb.EchoRequest, grpcechopb.EchoResponse]) error {
-	for index := int32(0); ; index++ {
-		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if err := stream.Send(&grpcechopb.EchoResponse{Message: req.GetMessage(), Index: index}); err != nil {
-			return err
-		}
-	}
-}
-
-// startEchoServer serves Echo on loopback and returns its host:port.
+// startEchoServer serves the grpcecho Echo service on loopback and returns its
+// host:port. It is the same server the egress e2e origin runs.
 func startEchoServer(t *testing.T) string {
 	t.Helper()
 
@@ -484,8 +448,7 @@ func startEchoServer(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("listening on loopback: %v", err)
 	}
-	server := grpc.NewServer()
-	grpcechopb.RegisterEchoServer(server, echoServer{})
+	server := grpcecho.NewServer()
 	go func() {
 		if err := server.Serve(listener); err != nil {
 			t.Logf("serving: %v", err)
@@ -585,6 +548,175 @@ func TestGRPCBidi(t *testing.T) {
 	}
 }
 
+func TestGRPCBidiConcurrent(t *testing.T) {
+	target := startEchoServer(t)
+	const count = 50
+
+	recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"burst","bidiCount":%d,"bidiMode":"concurrent"}`, target, count))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+	}
+	if len(got.Bidi) != count {
+		t.Fatalf("bidi has %d messages, want %d", len(got.Bidi), count)
+	}
+	for i, message := range got.Bidi {
+		if want := fmt.Sprintf("burst-%d", i); message.Message != want {
+			t.Errorf("bidi[%d].message = %q, want %q", i, message.Message, want)
+		}
+		if int(message.Index) != i {
+			t.Errorf("bidi[%d].index = %d, want %d", i, message.Index, i)
+		}
+	}
+}
+
+// The after-close responses follow the bidi responses and continue the index.
+func TestGRPCBidiAfterClose(t *testing.T) {
+	target := startEchoServer(t)
+
+	for _, mode := range []string{"lockstep", "concurrent"} {
+		t.Run(mode, func(t *testing.T) {
+			recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"ac","bidiCount":2,"afterCloseCount":3,"bidiMode":%q}`, target, mode))
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+			}
+			if len(got.Bidi) != 5 {
+				t.Fatalf("bidi has %d messages, want 5: %+v", len(got.Bidi), got.Bidi)
+			}
+			for i := range 2 {
+				if want := fmt.Sprintf("ac-%d", i); got.Bidi[i].Message != want || int(got.Bidi[i].Index) != i {
+					t.Errorf("bidi[%d] = %+v, want message %q index %d", i, got.Bidi[i], want, i)
+				}
+			}
+			for j := range 3 {
+				want := fmt.Sprintf("after-close-%d", j)
+				if got.Bidi[2+j].Message != want || int(got.Bidi[2+j].Index) != 2+j {
+					t.Errorf("bidi[%d] = %+v, want message %q index %d", 2+j, got.Bidi[2+j], want, 2+j)
+				}
+			}
+		})
+	}
+}
+
+// A failure the caller expects is a pass: 200, with the code and the partial
+// results it got before the failure.
+func TestGRPCBidiExpectedCode(t *testing.T) {
+	target := startEchoServer(t)
+
+	recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"fc","bidiCount":3,"failAfter":2,"failCode":"FailedPrecondition","expectCode":"FailedPrecondition"}`, target))
+
+	if recorder.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+	}
+	if got.Code != codes.FailedPrecondition.String() {
+		t.Errorf("code = %q, want %q; error = %s", got.Code, codes.FailedPrecondition.String(), got.Error)
+	}
+	if len(got.Bidi) != 2 {
+		t.Errorf("bidi has %d messages, want 2 partial results: %+v", len(got.Bidi), got.Bidi)
+	}
+	if !strings.Contains(got.Error, "failing after 2 responses as requested") {
+		t.Errorf("error = %q, want it to report the server's failure", got.Error)
+	}
+}
+
+// The same failure without an expectCode is an unexpected code, so 502.
+func TestGRPCBidiUnexpectedCode(t *testing.T) {
+	target := startEchoServer(t)
+
+	recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"fc","bidiCount":3,"failAfter":2,"failCode":"FailedPrecondition"}`, target))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
+	}
+	if got.Code != codes.FailedPrecondition.String() {
+		t.Errorf("code = %q, want %q", got.Code, codes.FailedPrecondition.String())
+	}
+}
+
+// Canceling the client side must reach the server, which records the stream
+// as canceled.
+func TestGRPCBidiCancelReachesServer(t *testing.T) {
+	target := startEchoServer(t)
+
+	recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"cancel","bidiCount":3,"cancelAfter":1,"expectCode":"Canceled"}`, target))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+	}
+	if got.Code != codes.Canceled.String() {
+		t.Errorf("code = %q, want %q", got.Code, codes.Canceled.String())
+	}
+	if got.ServerOutcome != "canceled" {
+		t.Errorf("serverOutcome = %q, want %q", got.ServerOutcome, "canceled")
+	}
+}
+
+// Payloads past the old 64 KiB frame size must arrive whole in both
+// directions, and each message must report the size it arrived at.
+func TestGRPCBidiLargePayload(t *testing.T) {
+	target := startEchoServer(t)
+	const size = 1<<20 + 4096
+
+	recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"big","bidiCount":2,"payloadBytes":%d,"replyBytes":%d}`, target, size, size))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+	}
+	if len(got.Bidi) != 2 {
+		t.Fatalf("bidi has %d messages, want 2", len(got.Bidi))
+	}
+	for i, message := range got.Bidi {
+		if message.Size != size {
+			t.Errorf("bidi[%d].size = %d, want %d", i, message.Size, size)
+		}
+		if want := fmt.Sprintf("big-%d", i); message.Message != want {
+			t.Errorf("bidi[%d].message trimmed of padding = %q, want %q", i, message.Message, want)
+		}
+	}
+}
+
+func TestGRPCBidiMultipleStreams(t *testing.T) {
+	target := startEchoServer(t)
+	const streams, count = 4, 10
+
+	recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"m","bidiCount":%d,"streams":%d}`, target, count, streams))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+	}
+	if len(got.BidiStreams) != streams {
+		t.Fatalf("bidiStreams has %d streams, want %d", len(got.BidiStreams), streams)
+	}
+	for k, stream := range got.BidiStreams {
+		if len(stream) != count {
+			t.Errorf("bidiStreams[%d] has %d messages, want %d", k, len(stream), count)
+			continue
+		}
+		for i, message := range stream {
+			if want := fmt.Sprintf("m-s%d-%d", k, i); message.Message != want {
+				t.Errorf("bidiStreams[%d][%d].message = %q, want %q", k, i, message.Message, want)
+			}
+			if int(message.Index) != i {
+				t.Errorf("bidiStreams[%d][%d].index = %d, want %d", k, i, message.Index, i)
+			}
+		}
+	}
+}
+
+func TestGRPCBidiIdle(t *testing.T) {
+	target := startEchoServer(t)
+
+	recorder, got := postGRPC(t, fmt.Sprintf(`{"target":%q,"message":"idle","bidiCount":3,"idleAfter":1,"idleMs":300}`, target))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+	}
+	if len(got.Bidi) != 3 {
+		t.Errorf("bidi has %d messages, want 3: %+v", len(got.Bidi), got.Bidi)
+	}
+}
+
 // A failed RPC must still report its gRPC code. That code is the only part of
 // the answer that proves trailers arrived, so collapsing it into the HTTP
 // status would erase the thing the e2e is looking for.
@@ -610,6 +742,89 @@ func TestGRPCFailureReportsStatusCode(t *testing.T) {
 	}
 }
 
+// startTLSEchoServer serves the grpcecho Echo service over TLS on loopback,
+// presenting material's certificate, and returns its host:port.
+func startTLSEchoServer(t *testing.T, material testcert.ServerTLS) string {
+	t.Helper()
+
+	cert, err := tls.X509KeyPair(material.Certificate, material.PrivateKey)
+	if err != nil {
+		t.Fatalf("loading server certificate: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening on loopback: %v", err)
+	}
+	server := grpcecho.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2"},
+	})))
+	go func() {
+		if err := server.Serve(listener); err != nil {
+			t.Logf("serving: %v", err)
+		}
+	}()
+	t.Cleanup(server.Stop)
+
+	return listener.Addr().String()
+}
+
+func TestGRPCOverTLS(t *testing.T) {
+	material := testcert.NewServerTLS(t, net.ParseIP("127.0.0.1"))
+	target := startTLSEchoServer(t, material)
+	const count = 3
+	body, err := json.Marshal(map[string]any{
+		"target":    target,
+		"message":   "secure",
+		"tls":       true,
+		"rootCA":    string(material.RootCA),
+		"bidiCount": count,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder, got := postGRPC(t, string(body))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %+v", recorder.Code, http.StatusOK, got)
+	}
+	if !got.TLS {
+		t.Error("tls = false, want true")
+	}
+	if got.ServerCertIssuer == "" {
+		t.Error("serverCertIssuer is empty, want the issuer of the server certificate")
+	}
+	if len(got.Bidi) != count {
+		t.Fatalf("bidi has %d messages, want %d: %+v", len(got.Bidi), count, got.Bidi)
+	}
+}
+
+func TestGRPCOverTLSWrongRoot(t *testing.T) {
+	material := testcert.NewServerTLS(t, net.ParseIP("127.0.0.1"))
+	target := startTLSEchoServer(t, material)
+	other := testcert.NewServerTLS(t, net.ParseIP("127.0.0.1"))
+	body, err := json.Marshal(map[string]any{
+		"target":  target,
+		"message": "secure",
+		"tls":     true,
+		"rootCA":  string(other.RootCA),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder, got := postGRPC(t, string(body))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
+	}
+	if got.Code != codes.Unavailable.String() {
+		t.Errorf("code = %q, want %q; error = %s", got.Code, codes.Unavailable.String(), got.Error)
+	}
+}
+
 func TestGRPCInvalidRequests(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -624,6 +839,42 @@ func TestGRPCInvalidRequests(t *testing.T) {
 		{name: "no host", method: http.MethodPost, body: `{"target":":50051"}`, status: http.StatusBadRequest},
 		{name: "non-numeric port", method: http.MethodPost, body: `{"target":"grpcecho:grpc"}`, status: http.StatusBadRequest},
 		{name: "URL not host:port", method: http.MethodPost, body: `{"target":"http://grpcecho:50051"}`, status: http.StatusBadRequest},
+		{name: "bidiMode not a mode", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiMode":"sideways","bidiCount":1}`, status: http.StatusBadRequest},
+		{name: "bidiCount over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1001}`, status: http.StatusBadRequest},
+		{name: "bidiCount negative", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":-1}`, status: http.StatusBadRequest},
+		{name: "streams without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","streams":2}`, status: http.StatusBadRequest},
+		{name: "streams over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"streams":17}`, status: http.StatusBadRequest},
+		{name: "payloadBytes without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","payloadBytes":1}`, status: http.StatusBadRequest},
+		{name: "payloadBytes over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"payloadBytes":2097153}`, status: http.StatusBadRequest},
+		{name: "replyBytes over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"replyBytes":2097153}`, status: http.StatusBadRequest},
+		{name: "afterCloseCount without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","afterCloseCount":1}`, status: http.StatusBadRequest},
+		{name: "afterCloseCount over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"afterCloseCount":1001}`, status: http.StatusBadRequest},
+		{name: "failAfter without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","failAfter":1,"failCode":"Internal"}`, status: http.StatusBadRequest},
+		{name: "failAfter negative", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"failAfter":-1,"failCode":"Internal"}`, status: http.StatusBadRequest},
+		{name: "failAfter without failCode", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"failAfter":1}`, status: http.StatusBadRequest},
+		{name: "failCode without failAfter", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"failCode":"Internal"}`, status: http.StatusBadRequest},
+		{name: "failCode not a code", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"failAfter":1,"failCode":"Teapot"}`, status: http.StatusBadRequest},
+		{name: "failCode OK", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"failAfter":1,"failCode":"OK"}`, status: http.StatusBadRequest},
+		{name: "cancelAfter without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","cancelAfter":1}`, status: http.StatusBadRequest},
+		{name: "cancelAfter zero", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"cancelAfter":0}`, status: http.StatusBadRequest},
+		{name: "cancelAfter beyond the responses", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":2,"afterCloseCount":1,"cancelAfter":4}`, status: http.StatusBadRequest},
+		{name: "cancelAfter with failAfter", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":2,"cancelAfter":1,"failAfter":1,"failCode":"Internal"}`, status: http.StatusBadRequest},
+		{name: "cancelAfter with several streams", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":2,"cancelAfter":1,"streams":2}`, status: http.StatusBadRequest},
+		{name: "expectCode without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","expectCode":"OK"}`, status: http.StatusBadRequest},
+		{name: "expectCode not a code", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"expectCode":"Nope"}`, status: http.StatusBadRequest},
+		{name: "idleAfter without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","idleAfter":1,"idleMs":1}`, status: http.StatusBadRequest},
+		{name: "idleAfter zero", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"idleAfter":0,"idleMs":1}`, status: http.StatusBadRequest},
+		{name: "idleAfter without idleMs", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"idleAfter":1}`, status: http.StatusBadRequest},
+		{name: "idleMs without idleAfter", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"idleMs":100}`, status: http.StatusBadRequest},
+		{name: "idleMs negative", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"idleAfter":1,"idleMs":-1}`, status: http.StatusBadRequest},
+		{name: "idleMs not below the default timeout", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"idleAfter":1,"idleMs":15000}`, status: http.StatusBadRequest},
+		{name: "idleMs not below timeoutMs", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiCount":1,"idleAfter":1,"idleMs":1000,"timeoutMs":1000}`, status: http.StatusBadRequest},
+		{name: "timeoutMs over the limit", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","timeoutMs":240001}`, status: http.StatusBadRequest},
+		{name: "timeoutMs negative", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","timeoutMs":-1}`, status: http.StatusBadRequest},
+		{name: "bidiMode without bidiCount", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","bidiMode":"lockstep"}`, status: http.StatusBadRequest},
+		{name: "dot in message with payloadBytes", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"a.b","bidiCount":1,"payloadBytes":10}`, status: http.StatusBadRequest},
+		{name: "dot in message with replyBytes", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"a.b","bidiCount":1,"replyBytes":10}`, status: http.StatusBadRequest},
+		{name: "rootCA without tls", method: http.MethodPost, body: `{"target":"grpcecho:50051","message":"hi","rootCA":"unused"}`, status: http.StatusBadRequest},
 	}
 
 	handler := newHandler(http.DefaultClient)
