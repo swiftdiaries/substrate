@@ -811,14 +811,13 @@ func TestBeginRejectsWhileActorHeld(t *testing.T) {
 			t.Run(firstName+"/"+secondName, func(t *testing.T) {
 				tr := newTestTracker(t, newFakeSnapshotStore())
 				tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
-				due := detachDueOf(tr, trackedActorUID)
 				begin := beginners(tr)
 
 				endFirst, err := begin[firstName](trackedActorUID)
 				if err != nil {
 					t.Fatalf("%s: %v", firstName, err)
 				}
-				due = detachDueOf(tr, trackedActorUID)
+				due := detachDueOf(tr, trackedActorUID)
 				returnsPromptly(t, secondName+" while held", func() {
 					if _, err := begin[secondName](trackedActorUID); !errors.Is(err, ErrActorBusy) {
 						t.Errorf("%s while %s holds the actor = %v, want %v", secondName, firstName, err, ErrActorBusy)
