@@ -18,8 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,16 +48,21 @@ var grpcEcho = e2e.ServerPod{
 // command, and what this suite is really pinning is the wire shape between the
 // two, which a shared struct would hide.
 type grpcEchoResponse struct {
-	Message string                `json:"message"`
-	Stream  []grpcEchoStreamedMsg `json:"stream"`
-	Bidi    []grpcEchoStreamedMsg `json:"bidi"`
-	Code    string                `json:"code"`
-	Error   string                `json:"error"`
+	Message          string                  `json:"message"`
+	Stream           []grpcEchoStreamedMsg   `json:"stream"`
+	Bidi             []grpcEchoStreamedMsg   `json:"bidi"`
+	BidiStreams      [][]grpcEchoStreamedMsg `json:"bidiStreams"`
+	ServerOutcome    string                  `json:"serverOutcome"`
+	TLS              bool                    `json:"tls"`
+	ServerCertIssuer string                  `json:"serverCertIssuer"`
+	Code             string                  `json:"code"`
+	Error            string                  `json:"error"`
 }
 
 type grpcEchoStreamedMsg struct {
 	Message string `json:"message"`
 	Index   int32  `json:"index"`
+	Size    int    `json:"size"`
 }
 
 // TestActorEgressGRPC covers the egress path with gRPC, which fails in ways the
@@ -155,5 +162,207 @@ func TestActorEgressGRPC(t *testing.T) {
 	// Everything above would also pass if the Actor's traffic had been
 	// masqueraded straight out instead of tunneled. This is what says it went
 	// through the gateway, on this Actor's own certificate.
+	assertEgressGatewayConnect(t, ctx, since, actorAtespace, actorName, strconv.Itoa(grpcEcho.Port))
+}
+
+// grpcEchoBodyLimit bounds one /grpc answer. The demo reports sizes and
+// de-padded messages rather than the payloads, so answers stay small; the limit
+// only guards against a runaway response.
+const grpcEchoBodyLimit = 8 << 20
+
+// postGRPCEgress posts input to the Actor's /grpc through the router, allowing
+// timeout for the whole call, and requires the answer to be HTTP 200.
+func postGRPCEgress(t *testing.T, ctx context.Context, router *e2e.RouterClient, ref resources.ActorRef, input map[string]any, timeout time.Duration) grpcEchoResponse {
+	t.Helper()
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("encoding the gRPC request: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	response, err := router.PostJSONWithin(ctx, ref, "/grpc", payload, timeout)
+	if err != nil {
+		t.Fatalf("gRPC egress transport failed: %v", err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, grpcEchoBodyLimit+1))
+	if err != nil {
+		t.Fatalf("reading the Actor's gRPC response: %v", err)
+	}
+	if len(raw) > grpcEchoBodyLimit {
+		t.Fatalf("the Actor's gRPC response exceeds %d bytes", grpcEchoBodyLimit)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Actor gRPC egress returned HTTP %d, want 200; body: %s", response.StatusCode, raw)
+	}
+	var got grpcEchoResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decoding the Actor's gRPC response: %v; body: %s", err, raw)
+	}
+	return got
+}
+
+// assertGRPCMessages checks that got holds want in order, with each entry's
+// index equal to its position.
+func assertGRPCMessages(t *testing.T, got []grpcEchoStreamedMsg, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d messages, want %d: %+v", len(got), len(want), got)
+	}
+	for i, m := range got {
+		if m.Message != want[i] {
+			t.Errorf("message %d = %q, want %q", i, m.Message, want[i])
+		}
+		if int(m.Index) != i {
+			t.Errorf("message %d index = %d, want %d", i, m.Index, i)
+		}
+	}
+}
+
+// TestActorEgressGRPCBidiStreaming drives the bidirectional leg of the gRPC
+// demo through the egress gateway over cleartext HTTP/2. Each case shapes one
+// stream behavior that the gateway must carry intact: concurrent sends,
+// responses after the client half-closes, a status mid-stream, a client
+// cancel, large frames, several streams on one connection, and an idle gap.
+func TestActorEgressGRPCBidiStreaming(t *testing.T) {
+	ctx := t.Context()
+	target := e2e.DeployServerPod(t, ctx, grpcEcho).Address()
+
+	actorAtespace, actorName, _ := createAndResumeActorWithEgress(t, ctx, "egress-grpc-bidi", e2e.EgressFixture(), e2e.EgressAllowAll()...)
+	router := mustRouterClient(t, ctx)
+	defer router.Close()
+	ref := resources.ActorRef{Atespace: actorAtespace, Name: actorName}
+
+	// Bound the access-log scan below to lines this test could have produced.
+	since := metav1.NewTime(time.Now().Add(-time.Minute))
+
+	warmup, err := json.Marshal(map[string]any{"target": target, "message": "warmup"})
+	if err != nil {
+		t.Fatalf("marshaling the warmup request: %v", err)
+	}
+	if status, body := postThroughEgressActor(t, ctx, router, ref, "/grpc", warmup); status != http.StatusOK {
+		t.Fatalf("warmup returned HTTP %d, want 200; body: %s", status, body)
+	}
+
+	// base is the request every case starts from; each case adds its fields.
+	base := func(extra map[string]any) map[string]any {
+		input := map[string]any{"target": target, "message": "m"}
+		for k, v := range extra {
+			input[k] = v
+		}
+		return input
+	}
+	const short = 30 * time.Second
+
+	t.Run("concurrent", func(t *testing.T) {
+		got := postGRPCEgress(t, ctx, router, ref, base(map[string]any{"bidiMode": "concurrent", "bidiCount": 50}), short)
+		if got.Code != "OK" {
+			t.Fatalf("gRPC status = %q, want OK; error: %s", got.Code, got.Error)
+		}
+		want := make([]string, 50)
+		for i := range want {
+			want[i] = fmt.Sprintf("m-%d", i)
+		}
+		assertGRPCMessages(t, got.Bidi, want)
+	})
+
+	t.Run("half-close while server sends", func(t *testing.T) {
+		for _, mode := range []string{"lockstep", "concurrent"} {
+			t.Run(mode, func(t *testing.T) {
+				got := postGRPCEgress(t, ctx, router, ref, base(map[string]any{"bidiMode": mode, "bidiCount": 2, "afterCloseCount": 3}), short)
+				if got.Code != "OK" {
+					t.Fatalf("gRPC status = %q, want OK; error: %s", got.Code, got.Error)
+				}
+				assertGRPCMessages(t, got.Bidi, []string{"m-0", "m-1", "after-close-0", "after-close-1", "after-close-2"})
+			})
+		}
+	})
+
+	t.Run("status mid-stream", func(t *testing.T) {
+		// FailedPrecondition is chosen because Envoy never synthesizes it, so
+		// it can only have come from the origin.
+		got := postGRPCEgress(t, ctx, router, ref, base(map[string]any{"bidiCount": 5, "failAfter": 2, "failCode": "FailedPrecondition", "expectCode": "FailedPrecondition"}), short)
+		if got.Code != "FailedPrecondition" {
+			t.Fatalf("gRPC status = %q, want FailedPrecondition; error: %s", got.Code, got.Error)
+		}
+		if len(got.Bidi) != 2 {
+			t.Fatalf("got %d responses before the failure, want 2: %+v", len(got.Bidi), got.Bidi)
+		}
+		if !strings.Contains(got.Error, "failing after 2 responses as requested") {
+			t.Errorf("error = %q, want the origin's failure message", got.Error)
+		}
+	})
+
+	t.Run("client cancel reaches origin", func(t *testing.T) {
+		got := postGRPCEgress(t, ctx, router, ref, base(map[string]any{"bidiCount": 5, "cancelAfter": 2, "expectCode": "Canceled"}), short)
+		if got.Code != "Canceled" {
+			t.Fatalf("gRPC status = %q, want Canceled; error: %s", got.Code, got.Error)
+		}
+		if got.ServerOutcome != "canceled" {
+			t.Errorf("server outcome = %q, want canceled", got.ServerOutcome)
+		}
+		if len(got.Bidi) != 2 {
+			t.Fatalf("got %d responses before the cancel, want 2: %+v", len(got.Bidi), got.Bidi)
+		}
+	})
+
+	t.Run("large payload", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			size int
+		}{
+			{name: "96KiB", size: 96 << 10},
+			{name: "1MiBPlus4KiB", size: 1<<20 + 4096},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got := postGRPCEgress(t, ctx, router, ref, base(map[string]any{"bidiCount": 3, "payloadBytes": tc.size, "replyBytes": tc.size}), short)
+				if got.Code != "OK" {
+					t.Fatalf("gRPC status = %q, want OK; error: %s", got.Code, got.Error)
+				}
+				if len(got.Bidi) != 3 {
+					t.Fatalf("got %d responses, want 3", len(got.Bidi))
+				}
+				for i, m := range got.Bidi {
+					if m.Size != tc.size {
+						t.Errorf("response %d size = %d, want %d", i, m.Size, tc.size)
+					}
+					if want := fmt.Sprintf("m-%d", i); m.Message != want {
+						t.Errorf("response %d message = %q, want %q", i, m.Message, want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("concurrent streams on one connection", func(t *testing.T) {
+		const streams, bidiCount = 8, 20
+		got := postGRPCEgress(t, ctx, router, ref, base(map[string]any{"streams": streams, "bidiMode": "concurrent", "bidiCount": bidiCount}), short)
+		if got.Code != "OK" {
+			t.Fatalf("gRPC status = %q, want OK; error: %s", got.Code, got.Error)
+		}
+		if len(got.BidiStreams) != streams {
+			t.Fatalf("got %d streams, want %d", len(got.BidiStreams), streams)
+		}
+		for k, stream := range got.BidiStreams {
+			want := make([]string, bidiCount)
+			for i := range want {
+				want[i] = fmt.Sprintf("m-s%d-%d", k, i)
+			}
+			assertGRPCMessages(t, stream, want)
+		}
+	})
+
+	t.Run("idle then resume", func(t *testing.T) {
+		// 40s outlasts every 30s connection-level idle timer on the path but not
+		// the outer 300s stream_idle_timeout (pinned by
+		// TestEgressManifestsPinTheStreamIdleTimeouts), which no request through
+		// ingress can reach.
+		got := postGRPCEgress(t, ctx, router, ref, base(map[string]any{"bidiCount": 3, "idleAfter": 1, "idleMs": 40000, "timeoutMs": 60000}), 90*time.Second)
+		if got.Code != "OK" {
+			t.Fatalf("gRPC status = %q, want OK; error: %s", got.Code, got.Error)
+		}
+		assertGRPCMessages(t, got.Bidi, []string{"m-0", "m-1", "m-2"})
+	})
+
 	assertEgressGatewayConnect(t, ctx, since, actorAtespace, actorName, strconv.Itoa(grpcEcho.Port))
 }

@@ -116,6 +116,21 @@ func (c *RouterClient) PostJSON(ctx context.Context, actorRef resources.ActorRef
 	return c.request(ctx, http.MethodPost, actorRef, path, bytes.NewReader(body))
 }
 
+// PostJSONWithin is PostJSON with a per-call client timeout, for operations
+// that outlast the default 30s client timeout. The caller must close the
+// response body.
+func (c *RouterClient) PostJSONWithin(ctx context.Context, actorRef resources.ActorRef, path string, body []byte, timeout time.Duration) (*http.Response, error) {
+	client := *c.http
+	client.Timeout = timeout
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(atenet.TargetActorHeader, actorRef.String())
+	return client.Do(req)
+}
+
 func (c *RouterClient) request(ctx context.Context, method string, actorRef resources.ActorRef, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {

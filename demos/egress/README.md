@@ -206,7 +206,8 @@ The `whoami` body shows `RemoteAddr: <atenet-egress pod IP>` — proof the reque
 ## gRPC over the same tunnel
 
 `POST /grpc` with `{"target":"<ip>:<port>","message":"hello","streamCount":2,"bidiCount":2}` makes
-the Actor dial that address as a cleartext-HTTP/2 gRPC server and return what came back:
+the Actor dial that address as an HTTP/2 gRPC server and return what came back. Set `"tls":true`
+to dial with TLS instead of cleartext:
 
 ```json
 {
@@ -229,8 +230,36 @@ One RPC per streaming shape, because each fails differently over a network path:
   response direction is still open. A path that serialized the two directions hangs here rather
   than answering short.
 
+The request fields `tls` and `rootCA` pick the transport. `tls` dials with TLS 1.2 or later and
+verifies the server against the system roots. `rootCA` is a PEM bundle that replaces the system
+roots for that dial; it is for tests, and an empty value means system roots. `rootCA` needs `tls`,
+and a bundle with no valid certificate answers `400`.
+
+The bidirectional fields below shape those streams. Each needs `bidiCount` to be positive, and an
+invalid combination answers `400` before anything is dialed.
+
+| Field | Meaning |
+|---|---|
+| `bidiMode` | `lockstep` (default) sends each message after the previous response; `concurrent` sends them all back to back. |
+| `streams` | Bidi streams to run over the one connection, 0 to 16. More than one fills `bidiStreams` instead of `bidi`. |
+| `payloadBytes` | Pads each sent message with `.` to this size, up to 2 MiB. |
+| `replyBytes` | Pads each response to this size, up to 2 MiB. The padding is trimmed from `message`; `size` keeps the length as received. |
+| `afterCloseCount` | Responses the server sends after the client half-closes, up to 1000. They are appended to `bidi` and expected. |
+| `failAfter` | Ends the stream with `failCode` after this many responses. Needs `failCode`. |
+| `failCode` | The gRPC code name to fail with, such as `FailedPrecondition`. Not `OK`. |
+| `cancelAfter` | Cancels the client side after this many responses, then polls the server for how it recorded the stream (`serverOutcome`, such as `canceled`). Needs `streams` at most 1. Excludes `failAfter`. |
+| `expectCode` | The code the bidi phase should end with. Answers `200` when it matches and `502` when it does not. Default `OK`. |
+| `idleAfter` | Pauses the server once, after this many responses. Needs `idleMs`. |
+| `idleMs` | Length of that pause in milliseconds. Must be below the timeout. |
+| `timeoutMs` | Overrides the 15 second request timeout, up to 240000. |
+
+The response reports the transport: `tls` is `true` when the unary `Echo` ran over TLS, and always
+present. Over TLS, `serverCertIssuer` carries the issuer of the leaf certificate the server
+presented; it is absent otherwise.
+
 The gateway terminates the `CONNECT` and relays opaque TCP, so all of this crosses it untouched. A
-failed RPC answers `502` and still carries its gRPC code in the same field.
+failed RPC answers `502` and still carries its gRPC code in the same field. A bidi phase that ends
+with the code `expectCode` names answers `200`, so a test can assert on a failure it asked for.
 
 `internal/e2e/suites/networking` drives this endpoint against the `testserver` fixture's `grpc`
 subcommand (`internal/e2e/fixtures/testserver`, deployed by `e2e.DeployServerPod` from the shared

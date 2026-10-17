@@ -231,3 +231,31 @@ func chainAccessLogsByLeg(tree node) map[string][]node {
 	}
 	return out
 }
+
+// TestEgressManifestsPinTheStreamIdleTimeouts pins stream_idle_timeout on each
+// HCM that carries a stat_prefix the egress gateway relies on. The outer
+// egress_connect value is the only idle limit on a CONNECT tunnel: the inner
+// mitm_http and mitm_cleartext HCMs disable theirs and rely on it, so changing
+// the outer value changes how long every tunnel may sit idle.
+func TestEgressManifestsPinTheStreamIdleTimeouts(t *testing.T) {
+	want := map[string]string{"egress_connect": "300s", "mitm_http": "0s", "mitm_cleartext": "0s"}
+	found := map[string]bool{}
+	for _, lc := range allChains(bootstrapTree(t, egressManifest)) {
+		for _, f := range list(lc.chain, "filters") {
+			prefix := str(child(f, "typed_config"), "stat_prefix")
+			wantValue, ok := want[prefix]
+			if !ok {
+				continue
+			}
+			found[prefix] = true
+			if got := str(child(f, "typed_config"), "stream_idle_timeout"); got != wantValue {
+				t.Errorf("HCM %q has stream_idle_timeout %q, want %q", prefix, got, wantValue)
+			}
+		}
+	}
+	for prefix := range want {
+		if !found[prefix] {
+			t.Errorf("no HCM with stat_prefix %q; the manifest changed shape and this test is checking nothing", prefix)
+		}
+	}
+}

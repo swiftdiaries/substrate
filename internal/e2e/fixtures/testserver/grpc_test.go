@@ -16,6 +16,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -27,10 +29,13 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
+	"go.ate.dev/substrate/internal/grpcecho"
 	"go.ate.dev/substrate/internal/proto/grpcechopb"
 )
 
@@ -48,7 +53,7 @@ func dialLocal(t *testing.T) *grpc.ClientConn {
 	if err != nil {
 		t.Fatalf("listening on loopback: %v", err)
 	}
-	server := newServer()
+	server := grpcecho.NewServer()
 	go func() {
 		if err := server.Serve(listener); err != nil {
 			t.Logf("serving: %v", err)
@@ -171,7 +176,7 @@ func TestEchoBidi(t *testing.T) {
 func TestEchoStreamRejectsBadCount(t *testing.T) {
 	client := grpcechopb.NewEchoClient(dialLocal(t))
 
-	for _, count := range []int32{0, -1, maxStreamCount + 1} {
+	for _, count := range []int32{0, -1, grpcecho.MaxStreamCount + 1} {
 		stream, err := client.EchoStream(testContext(t), &grpcechopb.EchoStreamRequest{Message: "x", Count: count})
 		if err == nil {
 			_, err = stream.Recv()
@@ -204,5 +209,67 @@ func TestReadyzAnswersHTTPGet(t *testing.T) {
 	newHealthHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if recorder.Code != http.StatusOK {
 		t.Errorf("GET /readyz = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
+func TestGRPCTLSCredentialsRejectIncompleteOrUnreadable(t *testing.T) {
+	for name, paths := range map[string][2]string{
+		"missing key":     {"cert.pem", ""},
+		"missing cert":    {"", "key.pem"},
+		"unreadable pair": {"missing-cert.pem", "missing-key.pem"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := grpcTLSCredentials(paths[0], paths[1]); err == nil {
+				t.Fatal("grpcTLSCredentials succeeded, want error")
+			}
+		})
+	}
+}
+
+// The TLS listener must negotiate h2 and serve the same Echo service as the
+// cleartext one. Checking the negotiated protocol pins the ALPN setting, which
+// a gRPC client would otherwise fail on only with a less obvious error.
+func TestGRPCServesTLS(t *testing.T) {
+	cert := writeOriginCertificate(t)
+	creds, err := grpcTLSCredentials(cert.certFile, cert.keyFile)
+	if err != nil {
+		t.Fatalf("grpcTLSCredentials: %v", err)
+	}
+
+	listener := listenLoopback(t)
+	server := grpcecho.NewServer(grpc.Creds(creds))
+	go func() {
+		if err := server.Serve(listener); err != nil {
+			t.Logf("serving: %v", err)
+		}
+	}()
+	t.Cleanup(server.Stop)
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(cert.caPEM) {
+		t.Fatal("adding CA certificate to pool: no certificates found")
+	}
+	clientCreds := credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(clientCreds))
+	if err != nil {
+		t.Fatalf("dialing %s: %v", listener.Addr(), err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	var p peer.Peer
+	response, err := grpcechopb.NewEchoClient(conn).Echo(testContext(t), &grpcechopb.EchoRequest{Message: "over tls"}, grpc.Peer(&p))
+	if err != nil {
+		t.Fatalf("Echo over TLS: %v", err)
+	}
+	if response.GetMessage() != "over tls" {
+		t.Errorf("Echo over TLS = %q, want %q", response.GetMessage(), "over tls")
+	}
+
+	info, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		t.Fatalf("peer auth info = %T, want credentials.TLSInfo", p.AuthInfo)
+	}
+	if got := info.State.NegotiatedProtocol; got != "h2" {
+		t.Errorf("negotiated protocol = %q, want %q", got, "h2")
 	}
 }
