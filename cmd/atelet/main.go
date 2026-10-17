@@ -638,6 +638,21 @@ func NewService(
 	return wms
 }
 
+// terminateAfterForget runs between a Terminate's Forget and its removal of
+// the actor's files. Tests replace it to pause a Terminate there.
+var terminateAfterForget = func() {}
+
+// actorBusyError reports snapshottracker.ErrActorBusy, an operation rejected
+// because another is in progress on the actor on this node, as UNAVAILABLE so
+// the caller retries it. ABORTED would fit better, but ateapi does not yet
+// treat ABORTED from atelet as retriable: it crashes the actor.
+func actorBusyError(err error) error {
+	if errors.Is(err, snapshottracker.ErrActorBusy) {
+		return apierror.Unavailable("%w", err)
+	}
+	return err
+}
+
 func (s *Atelet) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *ateletpb.RunResponse, err error) {
 	if errs := apivalidation.ValidateRunRequest(ctx, req); len(errs) > 0 {
 		return nil, resources.ToAPIError(errs)
@@ -656,7 +671,7 @@ func (s *Atelet) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *atele
 	}
 	endStart, err := s.snapshots.BeginStart(ctx, actorUID)
 	if err != nil {
-		return nil, err
+		return nil, actorBusyError(err)
 	}
 	defer endStart()
 
@@ -837,7 +852,7 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 	// checkpoint returns, so it cannot delete the snapshot being written.
 	endCheckpoint, err := s.snapshots.BeginCheckpoint(ctx, actorUID)
 	if err != nil {
-		return nil, err
+		return nil, actorBusyError(err)
 	}
 	defer endCheckpoint()
 
@@ -1158,7 +1173,7 @@ func (s *Atelet) PromoteSnapshot(ctx context.Context, req *ateletpb.PromoteSnaps
 	// promote returns, so it cannot delete the local snapshot being uploaded.
 	endCheckpoint, err := s.snapshots.BeginCheckpoint(ctx, req.GetActorUid())
 	if err != nil {
-		return nil, err
+		return nil, actorBusyError(err)
 	}
 	defer endCheckpoint()
 
@@ -1347,7 +1362,7 @@ func (s *Atelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (res
 	// the restore reads snapshot.object.
 	endStart, err := s.snapshots.BeginStart(ctx, actorUID)
 	if err != nil {
-		return nil, err
+		return nil, actorBusyError(err)
 	}
 	defer endStart()
 
@@ -1560,6 +1575,14 @@ func (s *Atelet) Terminate(ctx context.Context, req *ateletpb.TerminateRequest) 
 	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
 	actorUID := req.GetActorUid()
 
+	// Before any teardown, so a Terminate that overlaps another operation on
+	// the actor changes nothing.
+	endTerminate, err := s.snapshots.BeginTerminate(actorUID)
+	if err != nil {
+		return nil, actorBusyError(err)
+	}
+	defer endTerminate()
+
 	if req.GetWorkerPodUid() != "" {
 		var assetPaths map[string]string
 		sandboxRec, err := readSandboxRecord(actorUID)
@@ -1618,6 +1641,7 @@ func (s *Atelet) Terminate(ctx context.Context, req *ateletpb.TerminateRequest) 
 	if err := s.snapshots.Forget(actorUID); err != nil {
 		return nil, fmt.Errorf("failed to delete snapshot state during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
+	terminateAfterForget()
 	if err := snapshottracker.PruneLocalCheckpoints(ctx, actorUID); err != nil {
 		return nil, fmt.Errorf("failed to prune local checkpoints during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}

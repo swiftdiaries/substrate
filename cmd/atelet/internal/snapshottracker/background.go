@@ -135,8 +135,9 @@ func (t *Tracker) beginDueWork(actorUID string) func() {
 	now := t.clock.Now()
 	if due, ok := t.detachDueLocked(a); ok && !due.After(now) {
 		if a.holds > 0 {
-			// A Run, Restore, or Checkpoint of the actor is in progress, and
-			// queues the actor again when it ends (see holdLocked).
+			// A Run, Restore, Checkpoint, or Terminate of the actor is in
+			// progress, and queues the actor again when it ends (see
+			// holdLocked).
 			return nil
 		}
 		if finish, err := t.beginDetachLocked(t.ctx, a, true); err == nil {
@@ -149,11 +150,10 @@ func (t *Tracker) beginDueWork(actorUID string) func() {
 
 // requeueLocked queues the actor for when its next background operation is
 // due, if it has one, then drops the actor's entry from memory unless the
-// entry has an operation in progress, a Run, Restore, or Checkpoint in
-// progress, a retry hold, or a change that failed to save. A save that finds
-// the actor's directory gone leaves nothing unsaved. requeueLocked runs after
-// a change to the actor is saved, so it must not change what the snapshot
-// state file keeps.
+// entry has an operation in progress, a hold (see holdLocked), a retry hold,
+// or a change that failed to save. A save that finds the actor's directory
+// gone leaves nothing unsaved. requeueLocked runs after a change to the actor
+// is saved, so it must not change what the snapshot state file keeps.
 func (t *Tracker) requeueLocked(a *actorSnapshots) {
 	if due, ok := t.detachDueLocked(a); ok {
 		t.queue.AddAfter(a.actorUID, due.Sub(t.clock.Now()))

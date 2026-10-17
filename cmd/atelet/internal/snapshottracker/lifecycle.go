@@ -16,10 +16,27 @@ package snapshottracker
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 )
+
+// ErrActorBusy is what BeginStart, BeginCheckpoint, and BeginTerminate fail
+// with while another Run, Restore, Checkpoint, PromoteSnapshot, or Terminate of
+// the actor is in progress on this node. The rejected Begin leaves what the
+// tracker records of the actor as it was.
+var ErrActorBusy = errors.New("another operation on the actor is in progress on this node")
+
+// checkNoHold fails with ErrActorBusy while the actor has a hold.
+func checkNoHold(a *actorSnapshots) error {
+	if a.holds > 0 {
+		return fmt.Errorf("actor %s: %w", a.actorUID, ErrActorBusy)
+	}
+	return nil
+}
 
 // CommitLocal records snap, just stored in the actor's local checkpoint
 // directory by a Checkpoint in either upload mode, as the actor's latest local
@@ -111,12 +128,13 @@ func (t *Tracker) CommitPromoted(actorUID string, snap SnapshotRef) *ateletpb.Ac
 // leaves the detach unscheduled, since atelet cannot tell whether the workload
 // is running on the worker; the local snapshot stays until the next checkpoint
 // or Terminate on this node. When it cannot save that, it fails with
-// Unavailable, and the caller must not start the actor.
+// Unavailable, and the caller must not start the actor. It fails with
+// ErrActorBusy, without waiting, while the actor has a hold.
 func (t *Tracker) BeginStart(ctx context.Context, actorUID string) (end func(), err error) {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
 	// Every operation is a detach.
-	a, err := t.waitIdleLocked(ctx, actorUID, nil)
+	a, err := t.waitIdleLocked(ctx, actorUID, checkNoHold)
 	if err != nil {
 		return nil, err
 	}
@@ -142,12 +160,13 @@ func (t *Tracker) BeginStart(ctx context.Context, actorUID string) (end func(), 
 // node, once any detach in progress has finished, and returns the func to call
 // when the checkpoint ends, whether or not it succeeded. atelet does not
 // detach the actor in between, so a detach cannot delete the local snapshot
-// the checkpoint writes.
+// the checkpoint writes. It fails with ErrActorBusy, without waiting, while
+// the actor has a hold.
 func (t *Tracker) BeginCheckpoint(ctx context.Context, actorUID string) (end func(), err error) {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
 	// Every operation is a detach.
-	a, err := t.waitIdleLocked(ctx, actorUID, nil)
+	a, err := t.waitIdleLocked(ctx, actorUID, checkNoHold)
 	if err != nil {
 		return nil, err
 	}
@@ -158,11 +177,29 @@ func (t *Tracker) BeginCheckpoint(ctx context.Context, actorUID string) (end fun
 	return t.holdLocked(actorUID, a), nil
 }
 
-// holdLocked counts a Run, Restore, or Checkpoint of the actor in progress on
-// its entry a, which holds detaches of the actor off, and returns the func that
-// ends it and queues the actor again, for a detach that came due meanwhile. An
-// actor atelet tracks nothing of yet (a nil a) is held too, so no detach can
-// begin on a snapshot its first Checkpoint commits before it ends.
+// BeginTerminate records that a Terminate of the actor is in progress on this
+// node, and returns the func to call when the Terminate ends, whether or not
+// it succeeded. It fails with ErrActorBusy while the actor has a hold. Unlike
+// BeginStart and BeginCheckpoint, it does not wait for a detach in progress:
+// the Terminate's Forget cancels it.
+func (t *Tracker) BeginTerminate(actorUID string) (end func(), err error) {
+	t.lock(actorUID)
+	defer t.unlock(actorUID)
+	a := t.findLocked(actorUID)
+	if a != nil {
+		if err := checkNoHold(a); err != nil {
+			return nil, err
+		}
+	}
+	return t.holdLocked(actorUID, a), nil
+}
+
+// holdLocked records a Run, Restore, Checkpoint, or Terminate of the actor in
+// progress on its entry a, which holds detaches of the actor off, and returns
+// the func that ends it and queues the actor again, for a detach that came due
+// meanwhile. An actor atelet tracks nothing of yet (a nil a) is held too, so
+// no detach can begin on a snapshot its first Checkpoint commits before it
+// ends.
 func (t *Tracker) holdLocked(actorUID string, a *actorSnapshots) (end func()) {
 	if a == nil {
 		a = &actorSnapshots{actorUID: actorUID}
@@ -173,25 +210,31 @@ func (t *Tracker) holdLocked(actorUID string, a *actorSnapshots) (end func()) {
 		t.lock(actorUID)
 		defer t.unlock(actorUID)
 		a.holds--
-		if !t.tracksLocked(a) {
-			// Forget (via Terminate) dropped the actor while the Run, Restore,
-			// or Checkpoint was in progress.
-			return
-		}
 		t.requeueLocked(a)
 	}
 }
 
 // Forget drops the actor's state, in memory and on disk. It does not wait for
 // the actor's detach in progress: it cancels it, and the detach finds itself
-// abandoned when it ends.
+// abandoned when it ends. A held entry, such as that of the Terminate calling
+// Forget, stays in memory with nothing recorded, so the actor stays held until
+// the hold ends, which drops the entry.
 func (t *Tracker) Forget(actorUID string) error {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
 	t.abandonOpLocked(actorUID)
-	// Start the actor's backoff over; its entry, and any hold, goes below.
+	// Start the actor's backoff over.
 	t.retries.Forget(actorUID)
-	t.dropLocked(actorUID)
+	t.mu.Lock()
+	a := t.actors[actorUID]
+	t.mu.Unlock()
+	if a != nil && a.holds > 0 {
+		a.actorSnapshotsRecord = actorSnapshotsRecord{}
+		a.retryAt = time.Time{}
+		a.unsaved = false
+	} else {
+		t.dropLocked(actorUID)
+	}
 	return removeSnapshotState(actorUID)
 }
 
