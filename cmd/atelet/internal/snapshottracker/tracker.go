@@ -103,12 +103,12 @@ type Tracker struct {
 
 	// mu guards the actors map, and is never held during file I/O.
 	mu sync.Mutex
-	// actors maps actorUID to the entry of an actor with an operation, a Run,
-	// Restore, or Checkpoint, or a retry hold in progress, or whose state its
+	// actors maps actorUID to the entry of an actor with an operation, a hold
+	// (see holdLocked), or a retry hold in progress, or whose state its
 	// snapshot state file lacks because the save failed. requeueLocked drops
 	// any other entry, and findLocked then reads the state from the file.
-	// Read and change it through findLocked, findOrAddLocked, addLocked,
-	// dropLocked, and tracksLocked.
+	// Read and change it through findLocked, findOrAddLocked, addLocked, and
+	// dropLocked.
 	actors map[string]*actorSnapshots
 }
 
@@ -191,14 +191,6 @@ func (t *Tracker) dropLocked(actorUID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.actors, actorUID)
-}
-
-// tracksLocked reports whether a is still its actor's entry in memory: false
-// once Forget has dropped the actor, even if a new entry has been added since.
-func (t *Tracker) tracksLocked(a *actorSnapshots) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.actors[a.actorUID] == a
 }
 
 // detachDueLocked returns when atelet next checks whether to detach the actor,

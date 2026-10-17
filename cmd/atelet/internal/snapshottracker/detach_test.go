@@ -408,48 +408,53 @@ func TestTrackerStartFailsIfItCannotSave(t *testing.T) {
 
 // A restore or a checkpoint that arrives during a detach waits for it to end.
 func TestTrackerWaitsForDetach(t *testing.T) {
-	store := newFakeSnapshotStore()
-	store.setBlocking(true)
-	tr := newTestTracker(t, store)
-	tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
-	results := map[string]<-chan error{"detach": startDetach(t, tr)}
-	waitStarted(t, store)
-
-	for name, begin := range map[string]func(context.Context, string) (func(), error){
-		"beginStart":      tr.BeginStart,
-		"beginCheckpoint": tr.BeginCheckpoint,
+	for _, tc := range []struct {
+		name  string
+		begin func(*Tracker) func(context.Context, string) (func(), error)
+	}{
+		{"beginStart", func(tr *Tracker) func(context.Context, string) (func(), error) { return tr.BeginStart }},
+		{"beginCheckpoint", func(tr *Tracker) func(context.Context, string) (func(), error) { return tr.BeginCheckpoint }},
 	} {
-		result := make(chan error, 1)
-		results[name] = result
-		go func() {
-			end, err := begin(t.Context(), trackedActorUID)
-			if err == nil {
-				end()
-			}
-			result <- err
-		}()
-	}
-	for name, result := range results {
-		select {
-		case err := <-result:
-			t.Fatalf("%s returned (%v) during a detach", name, err)
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeSnapshotStore()
+			store.setBlocking(true)
+			tr := newTestTracker(t, store)
+			tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+			results := map[string]<-chan error{"detach": startDetach(t, tr)}
+			waitStarted(t, store)
 
-	store.release <- nil
-	for name, result := range results {
-		select {
-		case err := <-result:
-			if err != nil {
-				t.Errorf("%s: %v", name, err)
+			result := make(chan error, 1)
+			results[tc.name] = result
+			go func() {
+				end, err := tc.begin(tr)(t.Context(), trackedActorUID)
+				if err == nil {
+					end()
+				}
+				result <- err
+			}()
+			for name, result := range results {
+				select {
+				case err := <-result:
+					t.Fatalf("%s returned (%v) during a detach", name, err)
+				case <-time.After(50 * time.Millisecond):
+				}
 			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("%s did not return after the detach", name)
-		}
-	}
-	if got := tr.State(trackedActorUID).GetLatestLocal(); got != nil {
-		t.Errorf("latest_local = %v after the detach, want unset", got)
+
+			store.release <- nil
+			for name, result := range results {
+				select {
+				case err := <-result:
+					if err != nil {
+						t.Errorf("%s: %v", name, err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatalf("%s did not return after the detach", name)
+				}
+			}
+			if got := tr.State(trackedActorUID).GetLatestLocal(); got != nil {
+				t.Errorf("latest_local = %v after the detach, want unset", got)
+			}
+		})
 	}
 }
 
@@ -782,6 +787,141 @@ func TestTrackerDetachActsForTheActor(t *testing.T) {
 		tr.unlock(trackedActorUID)
 		if got != testActor {
 			t.Errorf("local copy's actor after promote = %+v, want %+v", got, testActor)
+		}
+	})
+}
+
+// beginners are the Begin calls of the actor's Run or Restore, Checkpoint or
+// PromoteSnapshot, and Terminate.
+func beginners(tr *Tracker) map[string]func(string) (func(), error) {
+	return map[string]func(string) (func(), error){
+		"beginStart":      func(uid string) (func(), error) { return tr.BeginStart(context.Background(), uid) },
+		"beginCheckpoint": func(uid string) (func(), error) { return tr.BeginCheckpoint(context.Background(), uid) },
+		"beginTerminate":  tr.BeginTerminate,
+	}
+}
+
+// While one Run, Restore, Checkpoint, or Terminate holds the actor, each Begin
+// fails at once with ErrActorBusy and leaves the actor as it was, and another
+// actor is not held up. Once the hold ends, the Begin goes ahead.
+func TestBeginRejectsWhileActorHeld(t *testing.T) {
+	const otherActorUID = "other-actor-uid"
+	for firstName := range beginners(nil) {
+		for secondName := range beginners(nil) {
+			t.Run(firstName+"/"+secondName, func(t *testing.T) {
+				tr := newTestTracker(t, newFakeSnapshotStore())
+				tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+				due := detachDueOf(tr, trackedActorUID)
+				begin := beginners(tr)
+
+				endFirst, err := begin[firstName](trackedActorUID)
+				if err != nil {
+					t.Fatalf("%s: %v", firstName, err)
+				}
+				due = detachDueOf(tr, trackedActorUID)
+				returnsPromptly(t, secondName+" while held", func() {
+					if _, err := begin[secondName](trackedActorUID); !errors.Is(err, ErrActorBusy) {
+						t.Errorf("%s while %s holds the actor = %v, want %v", secondName, firstName, err, ErrActorBusy)
+					}
+				})
+				if got := detachDueOf(tr, trackedActorUID); !got.Equal(due) {
+					t.Errorf("detachDue after the rejected %s = %v, want %v kept", secondName, got, due)
+				}
+				if holds := tr.actors[trackedActorUID].holds; holds != 1 {
+					t.Errorf("holds after the rejected %s = %d, want 1", secondName, holds)
+				}
+
+				endOther, err := begin[secondName](otherActorUID)
+				if err != nil {
+					t.Errorf("%s of another actor = %v, want success", secondName, err)
+				} else {
+					endOther()
+				}
+
+				endFirst()
+				endSecond, err := begin[secondName](trackedActorUID)
+				if err != nil {
+					t.Fatalf("%s once the hold ended = %v, want success", secondName, err)
+				}
+				endSecond()
+			})
+		}
+	}
+}
+
+// A Terminate holds detaches off like a Run, Restore, or Checkpoint, but does
+// not wait for a detach in progress: its Forget cancels it.
+func TestBeginTerminate(t *testing.T) {
+	t.Run("holds off detaches", func(t *testing.T) {
+		tr := newTestTracker(t, newFakeSnapshotStore())
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+		end, err := tr.BeginTerminate(trackedActorUID)
+		if err != nil {
+			t.Fatalf("beginTerminate: %v", err)
+		}
+		defer end()
+		if _, err := tr.Detach(t.Context(), trackedActorUID); apierror.Code(err) != codes.Aborted {
+			t.Errorf("detach during a Terminate = %v, want Aborted", err)
+		}
+	})
+	t.Run("keeps the actor held after Forget", func(t *testing.T) {
+		tr := newTestTracker(t, newFakeSnapshotStore())
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+		end, err := tr.BeginTerminate(trackedActorUID)
+		if err != nil {
+			t.Fatalf("beginTerminate: %v", err)
+		}
+		if err := tr.Forget(trackedActorUID); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		if got := tr.State(trackedActorUID); !proto.Equal(got, &ateletpb.ActorSnapshotState{}) {
+			t.Errorf("state after Forget = %v, want empty", got)
+		}
+		if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(trackedActorUID)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("snapshot state file after Forget: %v, want it removed", err)
+		}
+		if _, err := tr.BeginStart(t.Context(), trackedActorUID); !errors.Is(err, ErrActorBusy) {
+			t.Errorf("beginStart after Forget, before the Terminate ends = %v, want %v", err, ErrActorBusy)
+		}
+		end()
+		if inMemory(tr) {
+			t.Error("entry in memory after the Terminate ended, want it dropped")
+		}
+		endStart, err := tr.BeginStart(t.Context(), trackedActorUID)
+		if err != nil {
+			t.Fatalf("beginStart after the Terminate ended: %v", err)
+		}
+		endStart()
+	})
+	t.Run("does not wait for a detach", func(t *testing.T) {
+		store := newFakeSnapshotStore()
+		store.setBlocking(true)
+		tr := newTestTracker(t, store)
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+		detached := startDetach(t, tr)
+		waitStarted(t, store)
+		returnsPromptly(t, "beginTerminate during a detach", func() {
+			end, err := tr.BeginTerminate(trackedActorUID)
+			if err != nil {
+				t.Errorf("beginTerminate: %v", err)
+				return
+			}
+			if err := tr.Forget(trackedActorUID); err != nil {
+				t.Errorf("Forget: %v", err)
+			}
+			end()
+		})
+		// Forget canceled the detach, so it ends without a release.
+		select {
+		case err := <-detached:
+			if err == nil {
+				t.Error("detach canceled by the Terminate succeeded, want an error")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("detach did not end after the Terminate canceled it")
+		}
+		if got := tr.State(trackedActorUID); !proto.Equal(got, &ateletpb.ActorSnapshotState{}) {
+			t.Errorf("state after the Terminate = %v, want empty", got)
 		}
 	})
 }

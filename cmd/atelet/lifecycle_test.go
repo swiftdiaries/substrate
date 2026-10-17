@@ -144,7 +144,7 @@ func (f *fakeWorker) TerminateWorkload(_ context.Context, req *ateworkerpb.Termi
 
 // serveFakeWorker serves worker on a unix socket and points atelet's dialer at
 // it. The socket lives in its own short temp dir.
-func serveFakeWorker(t *testing.T, f *fakeWorker) {
+func serveFakeWorker(t *testing.T, f ateworkerpb.WorkerServer) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "worker-")
 	if err != nil {

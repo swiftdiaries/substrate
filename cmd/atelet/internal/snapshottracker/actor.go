@@ -162,9 +162,10 @@ type actorSnapshots struct {
 	// background worker or an RPC call such as Detach runs it; an actor has at
 	// most one. The entry stays in memory while op is set.
 	op *actorOp
-	// holds counts the Runs, Restores, and Checkpoints of the actor in
-	// progress on this node. While it is nonzero, atelet does not detach the
-	// actor, and the entry stays in memory.
+	// holds counts the Runs, Restores, Checkpoints, and Terminates of the
+	// actor in progress on this node: at most one, since each Begin fails
+	// while another holds the actor. While it is nonzero, atelet does not
+	// detach the actor, and the entry stays in memory.
 	holds int
 	// retryAt holds the actor's next background detach back after one failed.
 	// The entry stays in memory while retryAt is set.
