@@ -164,9 +164,15 @@ func TestMicrovmDemoWrappersForwardInstallerFlagsAndKeepHelperSteps(t *testing.T
 				t.Fatal(err)
 			}
 			callText := string(calls)
+			// ate-setup does not read these from the environment, so the
+			// wrapper must turn the sourced values into flags.
+			sourced := []string{"--context=kind-test", "--ko-docker-repo=localhost:5001", "--storage-bucket-name=ate-snapshots"}
+			if name == "run-microvm-demo-kind.sh" {
+				sourced = append(sourced, "--ko-default-platforms=linux/arm64")
+			}
 			for _, line := range strings.Split(strings.TrimSpace(callText), "\n") {
 				if strings.HasPrefix(line, "ate ") || strings.HasPrefix(line, "kind ") {
-					for _, arg := range args {
+					for _, arg := range append(sourced, args...) {
 						if !strings.Contains(line, arg) {
 							t.Errorf("installer call %q is missing %q", line, arg)
 						}

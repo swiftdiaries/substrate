@@ -57,7 +57,6 @@ KO_DOCKER_REPO="${KO_DOCKER_REPO:-}"
 KUBECTL_CONTEXT="${KUBECTL_CONTEXT:-}"
 BUCKET_NAME="${BUCKET_NAME:-ate-snapshots}"
 ATE_INSTALL_KIND="${ATE_INSTALL_KIND:-false}"
-ATE_SETUP_ARGS=("$@")
 
 if [[ -z "${KO_DOCKER_REPO}" ]]; then
   echo "Error: KO_DOCKER_REPO is required (set it in .ate-dev-env.sh for GKE," >&2
@@ -65,6 +64,19 @@ if [[ -z "${KO_DOCKER_REPO}" ]]; then
   exit 1
 fi
 export KO_DOCKER_REPO
+
+# ate-setup reads ordinary settings only from --config and flags, so pass the
+# sourced ones explicitly; without --context it would install into the current
+# kube context while the steps below target KUBECTL_CONTEXT. Caller arguments
+# come last and win.
+ATE_SETUP_ARGS=(--ko-docker-repo="${KO_DOCKER_REPO}" --storage-bucket-name="${BUCKET_NAME}")
+if [[ -n "${KUBECTL_CONTEXT}" ]]; then
+  ATE_SETUP_ARGS+=(--context="${KUBECTL_CONTEXT}")
+fi
+if [[ -n "${KO_DEFAULTPLATFORMS:-}" ]]; then
+  ATE_SETUP_ARGS+=(--ko-default-platforms="${KO_DEFAULTPLATFORMS}")
+fi
+ATE_SETUP_ARGS+=("$@")
 
 # ANSI color codes for prettier output (mirrors hack/install-ate.sh).
 COLOR_CYAN='\033[1;36m'
